@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 import shelve
 import json
-from supabase import create_client
+from supabase import create_client # Removed APIResponse import
 import utils
 from prometheus_client import start_http_server, Counter, Gauge
 import random
@@ -22,6 +22,7 @@ from fake_useragent import UserAgent
 from tenacity import retry, wait_exponential, stop_after_attempt
 import urllib.robotparser
 from urllib.parse import urljoin
+import ssl # Import ssl module
 
 # --- Configuration ---
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
@@ -77,7 +78,7 @@ crawled_pages_metric = Counter('crawled_pages', 'Total pages crawled')
 extraction_success_metric = Counter('extraction_success', 'Successful extractions')
 extraction_failure_metric = Counter('extraction_failure', 'Failed extractions')
 relevance_score_gauge = Gauge('avg_relevance_score', 'Average Relevance Score')
-start_http_server(8000)
+start_http_server(8001)
 
 supabase_client = create_client(
     SUPABASE_URL,
@@ -107,71 +108,47 @@ def can_crawl(url, user_agent='PropertyManagerCrawler/1.3'):
         return True
 
 
-async def crawl_and_extract_async(session, context, proxy_pool): # Modified to accept proxy_pool
-    print("DEBUG: Entering crawl_and_extract_async for url:", context.get('url'))
-    url = context["url"]
-    logger.info(f"Crawling {url} for {context['city']} - {context['term']}")
-    crawled_pages_metric.inc()
-
-    # Proxy selection is now handled in fetch_url, just pass the proxy_pool
-    try:
-        # Pass proxy_pool to extract_contact_info
-        data = await utils.extract_contact_info(session, url, context, proxy_pool=proxy_pool)
-        print("DEBUG: Data from utils.extract_contact_info:", data)
-        if data:
-            logger.debug(f"Successfully extracted data from: {url} ") # Proxy info now in fetch_url logs
-            extraction_success_metric.inc()
-            relevance_score_gauge.inc(data.get("Relevance Score", 0))
-            return data
-        else:
-            extraction_failure_metric.inc()
-            logger.warning(f"Extraction failed for {url} (extract_contact_info returned None).") # Proxy info now in fetch_url logs
+async def process_urls_async(url_contexts, proxy_pool, ssl_context):
+    async def controlled_crawl(session, context): # Add session as argument here
+        try: # Added try-except block
+            async with semaphore:
+                data = await utils.crawl_and_extract_async(session, context, proxy_pool=proxy_pool, ssl_context=ssl_context) # Pass session here
+                print(f"DEBUG (controlled_crawl): Data extracted from {context['url']}: {data}")
+                if data and data.get('website_url'): # Added website_url check
+                    db_saved = save_to_supabase(supabase_client, data)
+                    if not db_saved:
+                        save_to_csv([data], context.get("batch_number", 0))
+                    return data
+                print(f"DEBUG (controlled_crawl): Extraction failed for {context['url']}")
+                return None
+        except aiohttp.ClientError as e:
+            logger.warning(f"Client error in controlled_crawl for {context.get('url')}: {str(e)}")
             return None
-    except Exception as e:
-        extraction_failure_metric.inc()
-        logger.exception(f"Exception during async crawl/extraction for {url}: {e}") # Proxy info now in fetch_url logs
-        print(f"DEBUG: Exception in crawl_and_extract_async: {e}")
-        return None
-
-
-async def process_urls_async(url_contexts, proxy_pool): # Modified to accept proxy_pool
-    print("DEBUG: Entering process_urls_async with url_contexts:", url_contexts)
+        except Exception as e_controlled_crawl:
+            if "Rate limit" in str(e_controlled_crawl):
+                logger.warning(f"Rate limit encountered in controlled_crawl for {context.get('url')}: {e_controlled_crawl}")
+            logger.exception(f"Exception in controlled_crawl for {context.get('url')}: {e_controlled_crawl}")
+            return None
 
     extracted_data_list = []
     semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
-    async def controlled_crawl(context):
-        async with semaphore: # Ensure semaphore is used in controlled_crawl
-            await asyncio.sleep(random.uniform(2, 5))
-            async with aiohttp.ClientSession() as session:
-                try:
-                    # Pass proxy_pool to crawl_and_extract_async
-                    data = await crawl_and_extract_async(session, context, proxy_pool=proxy_pool)
-                    print(f"DEBUG (controlled_crawl): Data extracted from {context['url']}: {data}")
-                    if data:
-                        db_saved = save_to_supabase(supabase_client, data)
-                        if not db_saved:
-                            save_to_csv([data], context.get("batch_number", 0))
-                        return data
-                    print(f"DEBUG (controlled_crawl): Extraction failed for {context['url']}")
-                    return None
-                except aiohttp.ClientError as e:  # More specific error handling
-                    logger.warning(f"Client error in controlled_crawl for {context.get('url')}: {str(e)}")
-                    return None
-                except Exception as e_controlled_crawl:
-                    logger.exception(f"Exception in controlled_crawl for {context.get('url')}: {e_controlled_crawl}") # Keep detailed logging
-                    return None
+    async def controlled_crawl_wrapper(session, context): # Modify wrapper to accept session
+        async with semaphore:
+            return await controlled_crawl(session, context) # Pass session to controlled_crawl
 
-    try:
-        tasks = [controlled_crawl(context) for context in url_contexts]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        print(f"DEBUG (process_urls_async): Results from asyncio.gather: {results}")
-        extracted_data_list = [result for result in results if result is not None] # Filter out None results
-        print("DEBUG: Exiting process_urls_async, returning:", extracted_data_list)
-        return extracted_data_list
-    except Exception as e_process_urls:
-        logger.exception(f"Exception in process_urls_async: {e_process_urls}")
-        return None
+    connector = aiohttp.TCPConnector(ssl=ssl_context) # Create connector here
+    async with aiohttp.ClientSession(connector=connector) as session: # Create session here and use it
+        try:
+            tasks = [controlled_crawl_wrapper(session, context) for context in url_contexts] # Pass session to wrapper
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            print("DEBUG: (process_urls_async): Results from asyncio.gather:", results)
+            extracted_data_list = [result for result in results if result is not None]
+            print("DEBUG: Exiting process_urls_async, returning:", extracted_data_list)
+            return extracted_data_list
+        except Exception as e_process_urls:
+            logger.exception(f"Exception in process_urls_async: {e_process_urls}")
+            return None
 
 
 async def get_google_search_results(session, city, term):
@@ -181,29 +158,52 @@ async def get_google_search_results(session, city, term):
         "engine": "google",
         "q": f"{city} {term}",
         "gl": "us",
-        "hl": "en", # Added language parameter
-        "num": 10,  # Reduced num to 10 for testing
-        "api_key": SERPAPI_API_KEY # CRITICAL FIX: Explicitly pass API key here
+        "hl": "en",
+        "num": 10,
+        "api_key": SERPAPI_API_KEY,
+        "async": True,
+        "no_cache": True
     }
-    for page_num in range(1, PAGES_PER_QUERY + 1):
-        params["start"] = (page_num - 1) * 10 # Correct pagination for num=10
-        params["async"] = True # keep async here, it is needed for serpapi library
-        try:
-            search = GoogleSearch(params)
-            initial_search_result = await asyncio.to_thread(search.get_dict)
-            if initial_search_result and 'organic_results' in initial_search_result:
-                for result in initial_search_result['organic_results']:
-                    url = result.get('link')
-                    if url and utils.is_valid_url(url):
-                        all_urls.append(url)
-            else:
-                logger.warning(f"No organic results found in SerpAPI response for {city} {term} page {page_num}")
-        except Exception as e:
-            logger.error(f"SerpAPI search failed for {city} {term} page {page_num}: {e}. Response: {initial_search_result}") #Improved error log with response
-            serpapi_usage["failed_searches"] += 1
-            await asyncio.sleep(5)
-            continue
-        serpapi_usage["total_searches"] += 1
+    archived_params = params # Define archived_params here
+
+    try:
+        # Initial search submission
+        search = GoogleSearch(params)
+        initial_result = await asyncio.to_thread(search.get_dict)
+
+        if 'search_metadata' not in initial_result:
+            logger.error(f"SerpAPI search failed for {city} {term}: No metadata in response")
+            return {"city": city, "term": term, "urls": []}
+
+        search_id = initial_result['search_metadata']['id']
+        logger.info(f"Search ID {search_id} submitted. Waiting 10 seconds for results...") # reduced wait time
+        await asyncio.sleep(10)  # Reduced wait time to 10 seconds
+
+        # Retry logic with backoff
+        max_retries = 3
+        for attempt in range(max_retries):
+            archived_search = GoogleSearch(archived_params).get_search_archive(search_id) # Use defined archived_params
+            if 'organic_results' in archived_search:
+                break
+            await asyncio.sleep(10 * (attempt + 1))  # 10s, 20s, 30s backoff
+        else:
+            logger.error(f"Max retries reached for {search_id}")
+            return {"city": city, "term": term, "urls": []} # Return empty list on max retries
+
+
+        if 'organic_results' in archived_search:
+            logger.debug(f"Raw SerpAPI results: {archived_search['organic_results']}")  # Add debug logging
+            for result in archived_search['organic_results']:
+                url = result.get('link')
+                if url and utils.is_valid_url(url):
+                    all_urls.append(url)
+                    logger.debug(f"Accepted URL: {url}")  # Log accepted URLs
+            logger.info(f"Found {len(all_urls)} valid URLs for {city} {term}")
+        else:
+            logger.warning(f"No organic results in archived search for {city} {term}")
+
+    except Exception as e:
+        logger.error(f"SerpAPI search failed for {city} {term}: {str(e)}")
 
     return {"city": city, "term": term, "urls": all_urls}
 
@@ -211,7 +211,14 @@ async def get_google_search_results(session, city, term):
 def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database (now synchronous)."""
     try:
-        # Add rigorous duplicate check
+        # --- Data Validation ---
+        required_fields = ['website_url']  # Only require URL
+        if not data.get('website_url'):
+            logger.warning(f"Missing website URL, skipping insert")
+            return False
+        # --- End Data Validation ---
+
+
         existing = supabase_client.table('property_managers') \
             .select('website_url') \
             .eq('website_url', str(data['website_url'])) \
@@ -219,51 +226,53 @@ def save_to_supabase(supabase_client, data):
 
         if existing.data:
             logger.warning(f"Duplicate URL skipped: {data['website_url']}")
-            return True  # Considered successful skip
+            return True
 
         data_for_supabase = {
-            'social_media': data.get('social_media', []), # Direct list, no json.dumps
-            'website_url': str(data.get('website_url', 'N/A')),
+            'website_url': str(data.get('website_url')), # website_url is mandatory
+            'social_media': data.get('social_media', []),
             'city': str(data.get('city', 'N/A')),
             'search_term': str(data.get('search_term', 'N/A')),
             'company_name': str(data.get('company_name', 'N/A')),
-            'email_addresses': data.get('email_addresses', []), # Direct list, no json.dumps
-            'phone_numbers': data.get('phone_numbers', []),  # Direct list, no json.dumps
+            'email_addresses': data.get('email_addresses', []),
+            'phone_numbers': data.get('phone_numbers', []),
             'physical_address': data.get('physical_address', 'N/A'),
             'relevance_score': data.get('relevance_score', 0.0),
             'estimated_properties': data.get('estimated_properties', 0) or 0,
-            'service_areas': data.get('service_areas', []), # Direct list, no json.dumps
-            'management_software': data.get('management_software', []), # Direct list, no json.dumps
-            'license_numbers':  data.get('license_numbers', []), # Direct list, no json.dumps
-            'llm_category': data.get('llm_category', None)
+            'service_areas': data.get('service_areas', []),
+            'management_software': data.get('management_software', []),
+            'license_numbers':  data.get('license_numbers', []),
+            'llm_category': data.get('llm_category', None) # LLM Category now always saved
         }
-        logger.debug(f"Supabase Insert Payload: {data_for_supabase}") # Debugging log for payload
+        logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
         response = supabase_client.table('property_managers').insert(data_for_supabase).execute()
 
-        print(f"DEBUG (save_to_supabase): Full Supabase response object: {response}")
+        logger.debug(f"Supabase response: {str(response)[:200]}...") # Improved debug logging - truncated response
 
-        # --- CORRECTED ERROR CHECKING (Reverted to response.get('error') and added data check) ---
-        if response.get('error'):  # Use response.get('error') - CORRECT WAY for supabase-py
-            logger.error(f"Supabase insert error for {data.get('website_url')}: {response.get('error')}")
-        elif not response.data:  # Added check for empty response.data
-            logger.error(f"Supabase insert failed for {data.get('website_url')}: No data returned, possible issue.")
-        else:
-            logger.debug(f"Data saved to Supabase for: {data.get('website_url')}")
-            return True
-        # --- END CORRECTED ERROR CHECKING ---
+        # --- UPDATED ERROR CHECKING  ---
+        if hasattr(response, 'error') and response.error:
+            logger.error(f"Supabase insert failed: {response.error.message}")
+            return False
+
+        if not response.data:
+            logger.error("Supabase insert succeeded but returned no data")
+            return False
+
+        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, website_url: {data.get('website_url')}") # Improved success log - include id and URL
+        return True
+        # --- END UPDATED ERROR CHECKING ---
 
     except Exception as e_supabase:
-        logger.exception(f"Error saving to Supabase for {data.get('website_url')}: {e_supabase}")
+        logger.exception(f"Supabase error: {str(e_supabase)}")
         return False
-
 
 def save_to_csv(data_list, batch_number):
     csv_filename = f"property_managers_data_batch_{batch_number}.csv"
     logger.info(f"Saving batch {batch_number} data to CSV file: {csv_filename} (fallback)")
 
     fieldnames = [
-        "city", "search term", "company name", "website_url", "email addresses", # Lowercase field names
+        "city", "search term", "company name", "website_url", "email addresses",
         "phone numbers", "physical address", "relevance score", "timestamp",
         "social_media", "estimated_properties", "service_areas",
         "management_software", "license_numbers",
@@ -275,21 +284,21 @@ def save_to_csv(data_list, batch_number):
         for data_item in data_list:
             social_media_str = ", ".join([str(url) for url in data_item.get("social_media", [])])
             writer.writerow({
-                "city": data_item.get("city", "N/A"), # Lowercase keys
-                "search term": data_item.get("search_term", "N/A"), # Lowercase keys
-                "company name": data_item.get("company_name", "N/A"), # Lowercase keys
+                "city": data_item.get("city", "N/A"),
+                "search term": data_item.get("search_term", "N/A"),
+                "company name": data_item.get("company_name", "N/A"),
                 "website_url": data_item.get("website_url", "N/A"),
-                "email addresses": ", ".join(data_item.get("email_addresses", [])), # Lowercase keys
-                "phone numbers": ", ".join(data_item.get("phone_numbers", [])), # Lowercase keys
-                "physical address": data_item.get("physical_address", "N/A"), # Lowercase keys
-                "relevance score": data_item.get("relevance_score", 0.0), # Lowercase keys
+                "email_addresses": ", ".join(data_item.get("email_addresses", [])),
+                "phone_numbers": ", ".join(data_item.get("phone_numbers", [])),
+                "physical address": data_item.get("physical_address", "N/A"),
+                "relevance_score": data_item.get("relevance_score", 0.0),
                 "timestamp": datetime.now().isoformat(),
                 "social_media": social_media_str,
                 "estimated_properties": data_item.get("estimated_properties", 0),
                 "service_areas": ", ".join(data_item.get("service_areas", [])),
                 "management_software": ", ".join(data_item.get("management_software", [])),
                 "license_numbers": ", ".join(data_item.get("license_numbers", [])),
-                "llm_category": data_item.get("llm_category", "N/A") # Lowercase keys
+                "llm_category": data_item.get("llm_category", "N/A")
             })
 
 
@@ -297,16 +306,35 @@ async def main():
     start_time = time.time()
     logger.info("Crawler started...")
 
-    print("DEBUG: USE_PROXY from env:", os.getenv("USE_PROXY")) # Debugging line
-    print("DEBUG: PROXY_POOL from utils:", utils.PROXY_POOL)   # Debugging line
+    print("DEBUG: USE_PROXY from env:", os.getenv("USE_PROXY"))
+    logger.debug(f"DEBUG: OXLABS_USER from env: {os.getenv('OXLABS_USER')}")
+    logger.debug(f"DEBUG: OXLABS_PASS from env: {os.getenv('OXLABS_PASS')}")
+    logger.debug(f"DEBUG: SMARTPROXY_USER from env: {os.getenv('SMARTPROXY_USER')}")
+    logger.debug(f"DEBUG: SMARTPROXY_PASS from env: {os.getenv('SMARTPROXY_PASS')}")
+    logger.debug(f"DEBUG: BRIGHTDATA_USER from env: {os.getenv('BRIGHTDATA_USER')}")
+    logger.debug(f"DEBUG: BRIGHTDATA_PASS from env: {os.getenv('BRIGHTDATA_PASS')}")
+
+    proxy_pool_to_use = None
+
+    utils.validate_proxy_config()
+
+    if os.getenv("USE_PROXY", "False").lower() == "true":
+        proxy_pool_to_use = utils.get_proxy_pool()
+        print("DEBUG: PROXY_POOL from utils:", proxy_pool_to_use)
+    else:
+        print("DEBUG: PROXY_POOL from utils: Proxy Usage Disabled")
+
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    ssl_context.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256') # Modern ciphers
+
 
     error_budget["total"] = len(CITIES) * len(SEARCH_TERMS) * PAGES_PER_QUERY
 
-    # Load PROXY_POOL at the start of main() - assuming it's defined in utils.py
-    proxy_pool_to_use = utils.PROXY_POOL if os.getenv("USE_PROXY", "False").lower() == "true" else None
 
-
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    async with aiohttp.ClientSession(connector=connector) as session:
         with shelve.open('url_queue.db') as db:
             if 'url_contexts' not in db:
                 db['url_contexts'] = []
@@ -333,35 +361,30 @@ async def main():
             while url_contexts_queue:
                 print("DEBUG: len(url_contexts_queue) at loop start:", len(url_contexts_queue))
                 url_contexts_batch = []
-                 # Reduce batch size for debugging and to be gentler on sites
-                batch_size_crawl = 10 # Reduced from 20
+                batch_size_crawl = 10
                 for _ in range(min(batch_size_crawl, len(url_contexts_queue))):
                     url_contexts_batch.append(url_contexts_queue.pop(0))
 
                 db['url_contexts'] = url_contexts_queue
 
                 print("DEBUG: url_contexts_batch before process_urls_async:", url_contexts_batch)
-                # Pass proxy_pool to process_urls_async
-                extracted_data_list = await process_urls_async(url_contexts_batch, proxy_pool=proxy_pool_to_use)
+                extracted_data_list = await process_urls_async(url_contexts_batch, proxy_pool=proxy_pool_to_use, ssl_context=ssl_context)
                 print(f"DEBUG (main): Type of extracted_data_list: {type(extracted_data_list)}")
 
                 logger.info(f"Extracted data from {len(extracted_data_list)} websites in batch {batch_number} from queue.")
                 error_budget["success"] += sum(1 for r in extracted_data_list if r is not None)
                 error_budget["failed"] += sum(1 for r in extracted_data_list if r is None)
 
-
                 batch_number += 1
 
         logger.info("Finished processing all URLs from queue.")
         logger.info(f"SerpAPI Usage Summary: Total Searches: {serpapi_usage['total_searches']}, Failed Searches: {serpapi_usage['failed_searches']}")
         logger.info(f"Error budget summary: {error_budget}")
-        logger.info(f"Prometheus metrics available at http://localhost:8000/metrics")
-
+        logger.info(f"Prometheus metrics available at http://localhost:8001/metrics")
 
     end_time = time.time()
     duration = end_time - start_time
     logger.info(f"Crawler finished. Total time: {duration:.2f} seconds.")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

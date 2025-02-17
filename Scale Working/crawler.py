@@ -19,7 +19,7 @@ from supabase import create_client
 import utils  # Import utils
 from utils import (
     metrics, rotate_proxy, decay_proxy_scores, normalize_url,
-    crawl_and_extract_async, analyze_batch, get_session, proxy_health_check, close_playwright, get_playwright_instance, # <-- ENSURE close_playwright and get_playwright_instance ARE HERE
+    crawl_and_extract_async, analyze_batch, get_session, proxy_health_check, # <-- ENSURE proxy_health_check IS HERE
     BAD_PATH_PATTERN, GENERIC_DOMAINS, close_session, update_proxy_score # <-- ENSURE decay_proxy_scores AND update_proxy_score ARE HERE
 )
 from prometheus_client import start_http_server, Counter, Gauge, REGISTRY # MODIFIED: Import REGISTRY
@@ -373,35 +373,36 @@ def save_to_supabase(supabase_client, data):
 
 def save_to_csv(data_list, batch_number):
     csv_filename = f"property_managers_data_batch_{batch_number}.csv"
-    logger.info(f"Saving batch {batch_number} data to CSV file: {csv_filename}")
+    logger.info(f"Saving batch {batch_number} data to CSV file: {csv_filename} (fallback)")
 
     fieldnames = [
-        "city", "search_term", "company_name", "website_url",
-        "email_addresses", "phone_numbers", "physical_address",
-        "relevance_score", "social_media", "estimated_properties",
-        "service_areas", "management_software", "license_numbers",
+        "city", "search term", "company name", "website_url", "email addresses",
+        "phone numbers", "physical address", "relevance score", "timestamp",
+        "social_media", "estimated_properties", "service_areas",
+        "management_software", "license_numbers",
         "llm_category"
     ]
-
     with open(csv_filename, mode='w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for data_item in data_list:
+            social_media_str = ", ".join([str(url) for url in data_item.social_media])
             writer.writerow({
-                "city": data_item.city,
-                "search_term": data_item.search_term,
-                "company_name": data_item.company_name,
+                "city": data_item.city or "N/A",
+                "search term": data_item.search_term or "N/A",
+                "company_name": data_item.company_name or "N/A",
                 "website_url": str(data_item.website_url),
                 "email_addresses": ", ".join(data_item.email_addresses),
                 "phone_numbers": ", ".join(data_item.phone_numbers),
-                "physical_address": data_item.physical_address,
+                "physical_address": data_item.physical_address or "N/A",
                 "relevance_score": data_item.relevance_score,
-                "social_media": ", ".join(data_item.social_media),
-                "estimated_properties": data_item.estimated_properties,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "social_media": social_media_str,
+                "estimated_properties": data_item.estimated_properties or 0,
                 "service_areas": ", ".join(data_item.service_areas),
                 "management_software": ", ".join(data_item.management_software),
                 "license_numbers": ", ".join(data_item.license_numbers),
-                "llm_category": data_item.llm_category
+                "llm_category": data_item.llm_category or "N/A"
             })
 
 
@@ -412,7 +413,6 @@ async def main():
     print("DEBUG: PROXY_POOL from utils:", utils.get_proxy_pool()) # DEBUG: Print proxy pool
     utils.validate_proxy_config()
 
-    await utils.get_playwright_instance() # Initialize Playwright
 
     search_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
     crawl_semaphore = asyncio.Semaphore(CRAWL_CONCURRENCY)
@@ -565,23 +565,10 @@ if __name__ == "__main__":
     print("Before asyncio.run(main())...")
     try:
         asyncio.run(main())
-    except RuntimeError as e:
-        if "Event loop is closed" in str(e):
-            logger.error("Event loop closed error during main execution, likely during shutdown.")
-        else:
-            raise  # Re-raise other RuntimeErrors
     finally:
         print("Finally block executed, ensuring session closure...")
-        try:
-            asyncio.run(close_session())
-            asyncio.run(utils.close_playwright()) # Close Playwright
-        except RuntimeError as e_close:
-            if "Event loop is closed" in str(e_close):
-                logger.error("Event loop already closed during final session/playwright closure.")
-            else:
-                logger.error(f"Error during final cleanup: {e_close}")
-
-        print("Session and Playwright closed in finally block.")
+        asyncio.run(close_session())
+        print("Session closed in finally block.")
     print("After asyncio.run(main())...")
     # asyncio.run(test_rotation())
     # asyncio.run(test_metrics())

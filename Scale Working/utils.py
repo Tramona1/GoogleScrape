@@ -40,7 +40,7 @@ from aiohttp import ClientSession, TCPConnector, AsyncResolver
 from async_lru import alru_cache
 import redis
 from time import sleep
-from playwright.async_api import async_playwright
+
 
 MAX_CAPTCHA_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
@@ -142,16 +142,15 @@ CAPTCHA_COST = {
 BRIGHTDATA_PORTS = [22225, 22226, 33335] # Updated BRIGHTDATA_PORTS - FALLBACK PORT ADDED
 BRIGHTDATA_GEO = ["us-east", "us-west"]
 BRIGHTDATA_USER = os.getenv("BRIGHTDATA_USER")
-BRIGHTDATA_PASS = os.getenv("BRIGHTDATA_PASS") # ADDED BRIGHTDATA_PASS for proxy auth
 IMPERSONATIONS = ["chrome120", "chrome119"]
 captcha_lock = threading.Lock()
 
 PROXY_SCORE_CONFIG = { # Updated PROXY_SCORE_CONFIG - LESS AGGRESSIVE SCORING
-    'success': +30,    # Increased from +25
-    'failure': -20,    # Reduced from -40
-    'timeout': -15,    # Reduced from -30
-    'min_score': 20,   # Increased from 15
-    'initial': 70      # Increased from 50
+    'success': +25,
+    'failure': -40,
+    'timeout': -30,
+    'min_score': 15,  # Previous: 20 - REDUCED min_score
+    'initial': 50     # Previous: 70 - REDUCED initial score
 }
 
 
@@ -188,62 +187,6 @@ _session = None
 proxy_cycle = None
 
 SSL_WHITELIST = ["brd.superproxy.io", "gate.smartproxy.com"] # ADDED SSL_WHITELIST
-
-# --- Playwright Shared Instance ---
-_playwright_instance = None
-_browser = None
-
-async def get_playwright_instance():
-    global _playwright_instance
-    if _playwright_instance is None:
-        _playwright_instance = async_playwright()
-        await _playwright_instance.__aenter__()
-    return _playwright_instance
-
-async def get_browser_instance(proxy=None):
-    async with async_playwright() as p:
-        proxy_args = {}
-        if proxy: # Configure proxy if provided
-            proxy_parts = proxy.split('@')
-            if len(proxy_parts) == 2:
-                auth_user_pass, proxy_host_port = proxy_parts
-                auth = auth_user_pass.split(':')
-                if len(auth) == 2:
-                    proxy_user, proxy_pass = auth
-                    proxy_args = {
-                        "proxy": {
-                            "server": f"http://{proxy_host_port}",
-                            "username": proxy_user,
-                            "password": proxy_pass
-                        }
-                    }
-                else:
-                     proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth
-            else:
-                proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth
-
-        browser = await p.chromium.launch(**proxy_args)
-        return browser
-
-
-async def close_playwright():
-    global _browser, _playwright_instance
-    try:
-        if _browser:
-            await _browser.close()
-        if _playwright_instance:
-            try:
-                await _playwright_instance.__aexit__(None, None, None)  # Proper context manager exit
-            except AttributeError: # Fallback for environments where __aexit__ might not be directly callable
-                await _playwright_instance.stop()
-    except RuntimeError as e:
-        if "Event loop is closed" in str(e):
-            logger.warning("Event loop already closed during Playwright cleanup")
-    finally:
-        _browser = None
-        _playwright_instance = None
-        logger.info("Playwright closed.")
-# --- End Playwright Shared Instance ---
 
 
 async def get_session():
@@ -338,9 +281,7 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
 
     while try_again_with_new_proxy and use_proxy and current_proxy: # Proxy retry loop (only if proxy is enabled and available)
         try_again_with_new_proxy = False # Reset flag for each attempt
-        # --- Attempt to fetch with aiohttp first ---
         try:
-            hcaptcha_element = None  # Initialize hcaptcha_element here
             headers = {'User-Agent': random.choice(USER_AGENTS)}
             headers.update(random.choice(HEADERS_LIST)) # Add enhanced headers
             headers['Referer'] = urlparse(url).netloc # Add Referer header
@@ -388,244 +329,177 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
                 return None
 
             html_content = await resp.text()
-            print("----- HTML Content (First 500 chars) - aiohttp -----")  # Debugging print
+            print("----- HTML Content (First 500 chars) -----")  # Debugging print
             print(html_content[:500])  # Print first 500 characters
-            print("----- Text Content (First 500 chars) - aiohttp -----")  # Debugging print
+            print("----- Text Content (First 500 chars) -----")  # Debugging print
             soup = BeautifulSoup(html_content, 'lxml')
             text_content = soup.get_text(separator=' ', strip=True).lower()
             print(text_content[:500])  # Print first 500 characters
 
-            # --- hCaptcha Detection and Solving (BeautifulSoup - Initial Check) ---
+            # --- hCaptcha Detection and Solving ---
             hcaptcha_element = soup.find('h-captcha') # Look for h-captcha tag
             if hcaptcha_element:
-                logger.warning(f"hCaptcha element initially detected by BeautifulSoup, but might be JS rendered. Proceeding with Playwright check for {url}.")
-                # We will now proceed to Playwright to confirm and handle JS rendered hCaptcha
-            else:
-                # If hCaptcha not found in initial HTML, proceed with normal extraction using BeautifulSoup
-                logger.debug(f"hCaptcha not found in initial HTML, proceeding with BeautifulSoup parsing for {url}")
-                # --- reCAPTCHA and other checks (rest of your original code for reCAPTCHA, bad paths, generic domains etc.) ---
-                captcha_sitekey_v2 = re.search(r'data-sitekey="([^"]+)"', html_content) # reCAPTCHA v2 detection
-                captcha_sitekey_v3 = re.search(r'sitekey: ?"([^"]+)"', html_content) # reCAPTCHA v3 detection
-                captcha_sitekey_invisible = re.search(r'recaptcha\.render\("([^"]+)", {', html_content) # Invisible reCAPTCHA
-
-                if captcha_sitekey_v2 and not hcaptcha_element: # Only check for reCAPTCHA v2 if hCaptcha is NOT present
-                    captcha_sitekey = captcha_sitekey_v2.group(1)
-                    logger.warning(f"ReCAPTCHA v2 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
-                    captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
+                captcha_sitekey_hcaptcha = hcaptcha_element.get('data-sitekey') # Extract sitekey from data-sitekey attribute
+                if captcha_sitekey_hcaptcha:
+                    logger.warning(f"hCaptcha detected on {url}, sitekey: {captcha_sitekey_hcaptcha[:20]}...")
+                    captcha_response = await solve_captcha(url, captcha_sitekey_hcaptcha, 'hcaptcha', current_proxy) # Call solve_captcha with 'hcaptcha' type
                     if captcha_response:
                         metrics['captcha_solved'].inc()
-                        logger.info(f"reCAPTCHA v2 solved, proceeding with request...")
-                        captcha_params = {'g-recaptcha-response': captcha_response}
-                        resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for captcha retry
+                        logger.info(f"hCaptcha solved, proceeding with request...")
+                        captcha_params = {'h-captcha-response': captcha_response} # h-captcha parameter name
+                        resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
                         if resp_after_captcha.status == 200:
                             html_content = await resp_after_captcha.text()
                             soup = BeautifulSoup(html_content, 'lxml')
                             text_content = soup.get_text(separator=' ', strip=True).lower()
                         else:
-                            logger.error(f"reCAPTCHA v2 solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                            metrics['crawl_errors'].labels(type='captcha_failed_http', proxy=proxy_key).inc()
+                            logger.error(f"hCaptcha solve failed to get 200 OK, status: {resp_after_captcha.status}")
+                            metrics['crawl_errors'].labels(type='captcha_failed_http_hcaptcha', proxy=proxy_key).inc()
                             update_proxy_score(proxy_key, False)
                             return None
                     else:
-                        logger.error(f"ReCAPTCHA v2 solving failed for {url}")
-                        metrics['crawl_errors'].labels(type='captcha_unsolved_v2', proxy=proxy_key).inc()
+                        logger.error(f"hCaptcha solving failed for {url}")
+                        metrics['crawl_errors'].labels(type='captcha_unsolved_hcaptcha', proxy=proxy_key).inc()
                         update_proxy_score(proxy_key, False)
                         return None
-
-                elif captcha_sitekey_v3 and not hcaptcha_element: # Only check for reCAPTCHA v3 if hCaptcha is NOT present
-                    captcha_sitekey = captcha_sitekey_v3.group(1)
-                    logger.warning(f"ReCAPTCHA v3 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
-                    captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v3', current_proxy)
-                    if captcha_response:
-                        metrics['captcha_solved'].inc()
-                        logger.info(f"reCAPTCHA v3 solved (although v3 solving is skipped by default).")
-                    else:
-                        logger.warning(f"ReCAPTCHA v3 solving skipped or failed for {url}")
-                        metrics['crawl_errors'].labels(type='captcha_skipped_v3', proxy=proxy_key).inc()
-                        return None
-
-                elif captcha_sitekey_invisible and not hcaptcha_element: # Only check for invisible reCAPTCHA if hCaptcha is NOT present
-                    captcha_sitekey = captcha_sitekey_invisible.group(1)
-                    logger.warning(f"Invisible reCAPTCHA detected on {url}, element ID: {captcha_sitekey[:20]}...")
-                    captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
-                    if captcha_response:
-                        metrics['captcha_solved'].inc()
-                        logger.info(f"Invisible reCAPTCHA solved, proceeding with request...")
-                        captcha_params = {'g-recaptcha-response': captcha_response}
-                        resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for invisible captcha retry
-                        if resp_after_captcha.status == 200:
-                            html_content = await resp_after_captcha.text()
-                            soup = BeautifulSoup(html_content, 'lxml')
-                            text_content = soup.get_text(separator=' ', strip=True).lower()
-                        else:
-                            logger.error(f"Invisible reCAPTCHA solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                            metrics['crawl_errors'].labels(type='captcha_failed_http_invisible', proxy=proxy_key).inc()
-                            update_proxy_score(proxy_key, False)
-                            return None
-                    else:
-                        logger.error(f"Invisible reCAPTCHA solving failed for {url}")
-                        metrics['crawl_errors'].labels(type='captcha_unsolved_invisible', proxy=proxy_key).inc()
-                        update_proxy_score(proxy_key, False)
-                        return None
-
-                if BAD_PATH_PATTERN.search(parsed_url.path):
-                    logger.warning(f"Skipping URL due to bad path pattern: {url}")
-                    metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc()
-                    return None
-
-                domain = urlparse(url).netloc.lower() # Extract domain for generic domain check
-                if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # Improved generic domain check
-                    logger.warning(f"Skipping generic domain URL: {url}")
-                    metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc()
-                    return None
+            # --- End hCaptcha Detection and Solving ---
 
 
-                domain = urlparse(url).netloc.replace('www.', '')
+            captcha_sitekey_v2 = re.search(r'data-sitekey="([^"]+)"', html_content) # reCAPTCHA v2 detection
+            captcha_sitekey_v3 = re.search(r'sitekey: ?"([^"]+)"', html_content) # reCAPTCHA v3 detection
+            captcha_sitekey_invisible = re.search(r'recaptcha\.render\("([^"]+)", {', html_content) # Invisible reCAPTCHA
 
-                emails = extract_emails(html_content, domain)
-                phones = extract_phone_numbers(text_content)
-                address = extract_address(soup)
-                enhanced_data = await enhanced_data_parsing(soup, text_content)
-
-                extracted_data.email_addresses = emails
-                extracted_data.phone_numbers = phones
-                extracted_data = extracted_data.copy(update=enhanced_data)
-
-                relevance_score = calculate_relevance(text_content, term)
-                extracted_data.relevance_score = relevance_score
-                metrics['avg_relevance_score'].set(relevance_score)
-
-                # --- Relevance Check DISABLED (Option 1) ---
-                # if relevance_score < 0.3:
-                #     logger.warning(f"Low relevance score ({relevance_score:.2f}) for {url}, skipping detailed extraction.")
-                #     metrics['extraction_failure'].inc()
-                #     return None
-                # --- End Relevance Check Disabled ---
-
-
-                license_numbers = extract_license_numbers(text_content)
-                extracted_data.license_numbers = license_numbers
-                logger.info(f"Data extracted successfully from {url} (aiohttp), relevance: {relevance_score:.2f}, emails: {emails}, phones: {phones}")
-                metrics['extraction_success'].inc()
-                update_proxy_score(proxy_key, True) # Reward proxy on success
-
-                return extracted_data
-
-
-        except Exception as e_aiohttp: # Renamed exception for clarity
-            logger.error(f"aiohttp ClientError or Timeout for {url} using proxy: {current_proxy if current_proxy else 'None'}: {e_aiohttp}")
-            metrics['request_errors'].inc()
-            metrics['crawl_errors'].labels(type='client_error_aiohttp', proxy=proxy_key).inc()
-            update_proxy_score(proxy_key, False)
-            pass # Important: Continue to Playwright attempt
-        # --- End aiohttp attempt ---
-
-
-        # --- Playwright Attempt for hCaptcha (if aiohttp failed or initial hCaptcha detection) ---
-        if hcaptcha_element or isinstance(e_aiohttp, (aiohttp.ClientError, asyncio.TimeoutError)): # Only use Playwright if hCaptcha detected initially OR aiohttp failed
-            try:
-                async with await get_browser_instance(current_proxy) as browser: # Get shared browser instance with proxy
-                    page = await browser.new_page()
-
-                    await page.goto(url, timeout=CLIENT_TIMEOUT * 1000) # Timeout in milliseconds for Playwright
-
-                    # --- Enhanced hCaptcha Detection with Playwright ---
-                    hcaptcha_iframe = page.locator('iframe[src*="hcaptcha.com"]').first # Locate hCaptcha iframe
-                    hcaptcha_element_pw = None
-                    captcha_sitekey_hcaptcha_pw = None
-
-                    if hcaptcha_iframe:
-                        frame = await hcaptcha_iframe.content_frame() # Get content frame of iframe
-                        hcaptcha_element_pw = await frame.locator('h-captcha').first.element_handle() # Locate hCaptcha element within iframe
-                        if hcaptcha_element_pw:
-                            captcha_sitekey_hcaptcha_pw = await hcaptcha_element_pw.get_attribute('data-sitekey') # Get sitekey from Playwright
-
-                    hcaptcha_script = await page.locator('script[src*="hcaptcha.com"]').first # Check for hCaptcha script
-                    challenge_container = await page.locator('.hcaptcha-box').first # Check for challenge container
-
-                    if hcaptcha_element_pw or hcaptcha_script or challenge_container: # Enhanced hCaptcha detection conditions
-                        if captcha_sitekey_hcaptcha_pw:
-                            logger.warning(f"hCaptcha detected by Playwright on {url}, sitekey: {captcha_sitekey_hcaptcha_pw[:20]}... (Enhanced Detection)")
-                        else:
-                            logger.warning(f"hCaptcha detected by Playwright on {url} (No sitekey found in element, using script/container detection). (Enhanced Detection)")
-
-                        metrics['captcha_requests'].inc()
-                        # --- CAPTCHA Solving with Playwright (Conceptual - Not fully implemented here) ---
-                        # This is where you would integrate a 2Captcha Playwright extension or manual solving.
-                        # For now, we'll just log the detection and return None as solving is not fully implemented.
-                        logger.warning("hCaptcha solving with Playwright is not fully implemented in this version. Returning None.")
-                        metrics['crawl_errors'].labels(type='captcha_detected_hcaptcha_pw', proxy=proxy_key).inc()
-                        update_proxy_score(proxy_key, False)
-                        await page.close() # Close page after captcha detection (and before browser context manager exits)
-                        return None # Returning None as hCaptcha solving is not yet automated.
-
-                    else:
-                        logger.debug(f"hCaptcha NOT detected by Playwright on {url}, proceeding with extraction.")
-                        # Proceed with extraction using Playwright's rendered HTML
-                        html_content = await page.content()
-                        print("----- HTML Content (First 500 chars) - Playwright -----")
-                        print(html_content[:500])
-                        print("----- Text Content (First 500 chars) - Playwright -----")
+            if captcha_sitekey_v2 and not hcaptcha_element: # Only check for reCAPTCHA v2 if hCaptcha is NOT present
+                captcha_sitekey = captcha_sitekey_v2.group(1)
+                logger.warning(f"ReCAPTCHA v2 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
+                captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
+                if captcha_response:
+                    metrics['captcha_solved'].inc()
+                    logger.info(f"reCAPTCHA v2 solved, proceeding with request...")
+                    captcha_params = {'g-recaptcha-response': captcha_response}
+                    resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for captcha retry
+                    if resp_after_captcha.status == 200:
+                        html_content = await resp_after_captcha.text()
                         soup = BeautifulSoup(html_content, 'lxml')
                         text_content = soup.get_text(separator=' ', strip=True).lower()
-                        print(text_content[:500])
+                    else:
+                        logger.error(f"reCAPTCHA v2 solve failed to get 200 OK, status: {resp_after_captcha.status}")
+                        metrics['crawl_errors'].labels(type='captcha_failed_http', proxy=proxy_key).inc()
+                        update_proxy_score(proxy_key, False)
+                        return None
+                else:
+                    logger.error(f"ReCAPTCHA v2 solving failed for {url}")
+                    metrics['crawl_errors'].labels(type='captcha_unsolved_v2', proxy=proxy_key).inc()
+                    update_proxy_score(proxy_key, False)
+                    return None
 
-                        # --- Continue with extraction logic (similar to aiohttp part from here onwards, but using Playwright's soup and text_content) ---
-                        if BAD_PATH_PATTERN.search(parsed_url.path):
-                            logger.warning(f"Skipping URL due to bad path pattern (Playwright): {url}")
-                            metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc()
-                            await page.close()
-                            return None
+            elif captcha_sitekey_v3 and not hcaptcha_element: # Only check for reCAPTCHA v3 if hCaptcha is NOT present
+                captcha_sitekey = captcha_sitekey_v3.group(1)
+                logger.warning(f"ReCAPTCHA v3 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
+                captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v3', current_proxy)
+                if captcha_response:
+                    metrics['captcha_solved'].inc()
+                    logger.info(f"reCAPTCHA v3 solved (although v3 solving is skipped by default).")
+                else:
+                    logger.warning(f"ReCAPTCHA v3 solving skipped or failed for {url}")
+                    metrics['crawl_errors'].labels(type='captcha_skipped_v3', proxy=proxy_key).inc()
+                    return None
 
-                        domain = urlparse(url).netloc.lower() # Extract domain for generic domain check
-                        if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # Improved generic domain check
-                            logger.warning(f"Skipping generic domain URL (Playwright): {url}")
-                            metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc()
-                            await page.close()
-                            return None
+            elif captcha_sitekey_invisible and not hcaptcha_element: # Only check for invisible reCAPTCHA if hCaptcha is NOT present
+                captcha_sitekey = captcha_sitekey_invisible.group(1)
+                logger.warning(f"Invisible reCAPTCHA detected on {url}, element ID: {captcha_sitekey[:20]}...")
+                captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
+                if captcha_response:
+                    metrics['captcha_solved'].inc()
+                    logger.info(f"Invisible reCAPTCHA solved, proceeding with request...")
+                    captcha_params = {'g-recaptcha-response': captcha_response}
+                    resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for invisible captcha retry
+                    if resp_after_captcha.status == 200:
+                        html_content = await resp_after_captcha.text()
+                        soup = BeautifulSoup(html_content, 'lxml')
+                        text_content = soup.get_text(separator=' ', strip=True).lower()
+                    else:
+                        logger.error(f"Invisible reCAPTCHA solve failed to get 200 OK, status: {resp_after_captcha.status}")
+                        metrics['crawl_errors'].labels(type='captcha_failed_http_invisible', proxy=proxy_key).inc()
+                        update_proxy_score(proxy_key, False)
+                        return None
+                else:
+                    logger.error(f"Invisible reCAPTCHA solving failed for {url}")
+                    metrics['crawl_errors'].labels(type='captcha_unsolved_invisible', proxy=proxy_key).inc()
+                    update_proxy_score(proxy_key, False)
+                    return None
+
+            if BAD_PATH_PATTERN.search(parsed_url.path):
+                logger.warning(f"Skipping URL due to bad path pattern: {url}")
+                metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc()
+                return None
+
+            domain = urlparse(url).netloc.lower() # Extract domain for generic domain check
+            if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # Improved generic domain check
+                logger.warning(f"Skipping generic domain URL: {url}")
+                metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc()
+                return None
 
 
-                        domain = urlparse(url).netloc.replace('www.', '')
+            domain = urlparse(url).netloc.replace('www.', '')
 
-                        emails = extract_emails(html_content, domain)
-                        phones = extract_phone_numbers(text_content)
-                        address = extract_address(soup)
-                        enhanced_data = await enhanced_data_parsing(soup, text_content)
+            emails = extract_emails(html_content, domain)
+            phones = extract_phone_numbers(text_content)
+            address = extract_address(soup)
+            enhanced_data = await enhanced_data_parsing(soup, text_content)
 
-                        extracted_data.email_addresses = emails
-                        extracted_data.phone_numbers = phones
-                        extracted_data.physical_address = address
-                        extracted_data = extracted_data.copy(update=enhanced_data)
+            extracted_data.email_addresses = emails
+            extracted_data.phone_numbers = phones
+            extracted_data.physical_address = address
+            extracted_data = extracted_data.copy(update=enhanced_data)
 
-                        relevance_score = calculate_relevance(text_content, term)
-                        extracted_data.relevance_score = relevance_score
-                        metrics['avg_relevance_score'].set(relevance_score)
+            relevance_score = calculate_relevance(text_content, term)
+            extracted_data.relevance_score = relevance_score
+            metrics['avg_relevance_score'].set(relevance_score)
 
-                        license_numbers = extract_license_numbers(text_content)
-                        extracted_data.license_numbers = license_numbers
-                        logger.info(f"Data extracted successfully from {url} (Playwright), relevance: {relevance_score:.2f}, emails: {emails}, phones: {phones}")
-                        metrics['extraction_success'].inc()
-                        update_proxy_score(proxy_key, True) # Reward proxy on success
-                        await page.close()
-                        return extracted_data
-                    await page.close() # Ensure page is closed even if no hCaptcha
+            # --- Relevance Check DISABLED (Option 1) ---
+            # if relevance_score < 0.3:
+            #     logger.warning(f"Low relevance score ({relevance_score:.2f}) for {url}, skipping detailed extraction.")
+            #     metrics['extraction_failure'].inc()
+            #     return None
+            # --- End Relevance Check Disabled ---
 
-            except Exception as e_playwright:
-                logger.error(f"Playwright error for {url} using proxy: {current_proxy if current_proxy else 'None'}: {e_playwright}")
-                metrics['request_errors'].inc()
-                metrics['crawl_errors'].labels(type='playwright_error', proxy=proxy_key).inc()
-                update_proxy_score(proxy_key, False)
-                pass # Fallback to direct scraping if Playwright fails (or just return None after Playwright attempt)
-        # --- End Playwright attempt ---
-        else:
-            logger.debug(f"Skipping Playwright, proceeding with direct scraping for {url} as no initial hCaptcha and aiohttp successful.")
 
+            license_numbers = extract_license_numbers(text_content)
+            extracted_data.license_numbers = license_numbers
+            logger.info(f"Data extracted successfully from {url}, relevance: {relevance_score:.2f}, emails: {emails}, phones: {phones}")
+            metrics['extraction_success'].inc()
+            update_proxy_score(proxy_key, True) # Reward proxy on success
+
+            return extracted_data
+
+        except aiohttp.ClientError as e:
+            logger.error(f"aiohttp ClientError for {url} using proxy: {current_proxy if current_proxy else 'None'}: {e}")
+            metrics['request_errors'].inc()
+            metrics['crawl_errors'].labels(type='client_error', proxy=proxy_key).inc()
+            update_proxy_score(proxy_key, False)
+            pass # Important: Continue to the next attempt in the retry loop
+        except asyncio.TimeoutError:
+            logger.error(f"Asyncio timeout for {url} using proxy: {current_proxy if current_proxy else 'None'}")
+            metrics['request_errors'].inc()
+            metrics['crawl_errors'].labels(type='timeout_error', proxy=proxy_key).inc()
+            update_proxy_score(proxy_key, False)
+            pass # Important: Continue to the next attempt in the retry loop
+        except Exception as e_crawl:
+            logger.exception(f"Unexpected error during crawl and extraction for {url} using proxy: {current_proxy if current_proxy else 'None'}: {e_crawl}")
+            metrics['page_extraction_errors'].inc()
+            metrics['crawl_errors'].labels(type='extraction_error', proxy=proxy_key).inc()
+            update_proxy_score(proxy_key, False)
+            pass # Important: Continue to the next attempt in the retry loop
+        finally:
+            if current_proxy:
+                PROXY_HEALTH[current_proxy] = time.time()
 
     # --- Fallback to Direct Scraping (No Proxy) ---
     if use_proxy and proxy_pool and not current_proxy: # If proxies were intended but none available initially
         logger.warning(f"All proxies failed or none available. Attempting direct scraping without proxy for {url}")
-    elif use_proxy and proxy_pool: # If proxy retries failed or Playwright failed
-        logger.warning(f"Proxy attempts or Playwright failed for {url}. Falling back to direct scraping without proxy.")
+    elif use_proxy and proxy_pool: # If proxy retries failed
+        logger.warning(f"Proxy attempts failed for {url}. Falling back to direct scraping without proxy.")
 
     try: # Direct scraping attempt
         headers = {'User-Agent': random.choice(USER_AGENTS)}
@@ -1055,18 +929,7 @@ def extract_phone_numbers(text_content):
         ''', text_content, re.VERBOSE | re.IGNORECASE))) # Use text_content here
     print("----- Raw Phone Matches (Older Verbose Regex) -----") # Debugging print
     print(phone_matches)
-    # Reconstruct phone numbers as strings
-    phone_strings = []
-    for match in phone_matches:
-        country_code, area_code, exchange_code, line_number, extension = match
-        phone_number = ""
-        if country_code:
-            phone_number += f"+{country_code} "
-        phone_number += f"({area_code}) {exchange_code}-{line_number}"
-        if extension:
-            phone_number += f" ext. {extension}"
-        phone_strings.append(phone_number.strip()) # Add reconstructed number as string
-    return phone_strings
+    return phone_matches
 
 
 def extract_address(soup):
@@ -1254,24 +1117,21 @@ def get_proxy_pool():
     if os.getenv('BRIGHTDATA_USER') and os.getenv('BRIGHTDATA_PASS'):
         for port in BRIGHTDATA_PORTS:
             proxy_string = f"{os.getenv('BRIGHTDATA_USER')}:{os.getenv('BRIGHTDATA_PASS')}@brd.superproxy.io:{port}"
-            if "brd.superproxy.io" in proxy_string: # Apply Bright Data HTTP fix
-                proxy_string = proxy_string.replace("https://", "http://") + "?type=http" # Force HTTP for Bright Data
+            if "brd.superproxy.io" in proxy_string:  # Apply Bright Data HTTP fix
+                proxy_string = proxy_string.replace("https://", "http://") + "?type=http"  # Force HTTP for Bright Data
             proxies.append(proxy_string)
             provider_counts['brightdata'] += 1
 
     logger.info(f"Proxy pool 구성: {provider_counts}")
 
-    if not proxies: # Check if proxies list is empty after configuration
+    if not proxies:  # Check if proxies list is empty after configuration
         raise ValueError("No proxy credentials found in environment variables")
 
-    healthy_proxies = [proxy for proxy, score in PROXY_SCORES.items() if score > 20]
-    if healthy_proxies:
-        logger.debug(f"Using healthy proxies, count: {len(healthy_proxies)}")
-        return healthy_proxies
-    else:
-        logger.warning("No healthy proxies found, using refreshed pool.")
-        logger.debug("No healthy proxies found, using fresh pool (limited size).")
-        return proxies # Return ALL proxies (not limited/weighted random choices anymore)
-
-
-PROXY_REGEX = r'^(.+?:.+?@)?[\w\.-]+:\d+(\?.*)?$' # Modified regex to allow query parameters
+        healthy_proxies = [p for p, s in PROXY_SCORES.items() if s > 20] # More explicit variable name for score
+        if healthy_proxies:
+            logger.debug(f"Using healthy proxies, count: {len(healthy_proxies)}")
+            return healthy_proxies
+        else:
+            logger.warning("No healthy proxies found, using refreshed pool.")
+            logger.debug("No healthy proxies found, using fresh pool (limited size).")
+            return proxies  # Return ALL proxies if no healthy ones
