@@ -1,4 +1,3 @@
-# crawler.py - Corrected version (FINAL - ALL CHANGES IMPLEMENTED - LATEST VERSION - ERROR FIXES AND OPTIMIZATIONS - CONCURRENCY & BATCH FIXES - SESSION MANAGEMENT & PROXY ITERATOR - PRODUCTION READY UPDATES - HTTP2 REMOVED & PROXY VALIDATION & ROTATION - AIOHTTP VERSION FIX)
 print("Script execution started...")
 
 from dotenv import load_dotenv
@@ -19,7 +18,7 @@ from supabase import create_client
 import utils  # Import utils
 from utils import (
     metrics, rotate_proxy, decay_proxy_scores, normalize_url,
-    crawl_and_extract_async, analyze_batch, get_session, proxy_health_check, # <-- ENSURE proxy_health_check IS HERE
+    crawl_and_extract_async, analyze_batch, get_session, proxy_health_check, close_playwright, get_playwright_instance, # <-- ENSURE close_playwright and get_playwright_instance ARE HERE
     BAD_PATH_PATTERN, GENERIC_DOMAINS, close_session, update_proxy_score # <-- ENSURE decay_proxy_scores AND update_proxy_score ARE HERE
 )
 from prometheus_client import start_http_server, Counter, Gauge, REGISTRY # MODIFIED: Import REGISTRY
@@ -54,14 +53,14 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise EnvironmentError("SUPABASE_URL and SUPABASE_KEY environment variables must be set for database storage.")
 
 CITIES = [
-    "Sedona", "Los Angeles", "San Diego",
+    "Sedona", "Los Angeles", "San Diego", "Seattle", "portland", "Malibu", "Newport Beach"
     # "Houston", "Phoenix", "Philadelphia", "San Antonio",
 ]
 
 SEARCH_TERMS = [
     "vacation rentals",
-    # "short term rentals",
-    # "property managers short term rentals"
+    "short term rentals",
+    "property managers short term rentals"
 ]
 
 PAGES_PER_QUERY = 15
@@ -125,7 +124,9 @@ def rotate_proxy_crawler():
 
 
 async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOVED: session parameter
+    logger.debug(f"Entering process_urls_async with {len(url_contexts)} URLs") # DEBUG LOG - ENTRY POINT
     async def controlled_crawl(context, proxy_pool, crawl_semaphore): # REMOVED: session parameter
+        logger.debug(f"Entering controlled_crawl for URL: {context.get('url')}, City: {context.get('city')}") # DEBUG LOG - ENTRY POINT
         session = await get_session() # Get session from pool - SESSION POOLING - IMPORT FROM UTILS
         try:
             async with crawl_semaphore:
@@ -136,9 +137,9 @@ async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOV
 
                 logger.debug(f"Starting crawl_and_extract_async for {url}")
                 data = await utils.crawl_and_extract_async(session, context, proxy_pool=proxy_pool) # Use imported function and pass session
-                logger.debug(f"Finished crawl_and_extract_async for {context['url']}")
+                logger.debug(f"Finished crawl_and_extract_async for {context['url']}, Data: {data}") # DEBUG LOG - DATA AFTER CRAWL_AND_EXTRACT
                 print(f"DEBUG (controlled_crawl): Data extracted from {context['url']}: {data}")
-                if data and data.website_url: # Line 379 - Correct Indentation - CORRECTED .get() to attribute access
+                if data and data.url: # Line 379 - Correct Indentation - CORRECTED .get() to attribute access
                     db_saved = save_to_supabase(supabase_client, data) # Line 380 - Correct Indentation
                     if not db_saved: # Line 381 - Correct Indentation
                         save_to_csv( [data], context.get("batch_number", 0)) # Line 382 - Correct Indentation
@@ -160,8 +161,10 @@ async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOV
     try:
         tasks = [controlled_crawl_wrapper(context, proxy_pool, crawl_semaphore) for context in url_contexts] # REMOVED: session parameter
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug(f"DEBUG: (process_urls_async): Results from asyncio.gather: {results}") # DEBUG LOG - ASYNCIO.GATHER RESULTS
         print("DEBUG: (process_urls_async): Results from asyncio.gather:", results)
         extracted_data_list = [result for result in results if result is not None]
+        logger.debug(f"DEBUG: Exiting process_urls_async, returning: {extracted_data_list}") # DEBUG LOG - EXITING FUNCTION
         print("DEBUG: Exiting process_urls_async, returning:", extracted_data_list)
         return extracted_data_list
     except Exception as e_process_urls:
@@ -177,7 +180,7 @@ async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOV
 )
 async def get_google_search_results(city, term, proxy_pool): # REMOVED: session parameter
     global search_count, proxy_pool_to_use, current_proxy_index
-    logger.debug(f"Entering get_google_search_results for city={city}, term={term}")
+    logger.debug(f"Entering get_google_search_results for city={city}, term={term}") # DEBUG LOG - ENTRY POINT
     all_urls = []
     params = { # params is defined here, locally within the function
         "engine": "google",
@@ -222,6 +225,7 @@ async def get_google_search_results(city, term, proxy_pool): # REMOVED: session 
                 async with SEARCH_SEM: # SEARCH_SEM is defined globally
                     search = GoogleSearch(params) # params is defined above
                     initial_result = await asyncio.to_thread(search.get_dict)
+                    logger.debug(f"DEBUG: Initial SerpAPI result for {city} {term}: {initial_result.get('search_metadata')}") # DEBUG LOG - INITIAL RESULT METADATA
         except asyncio.TimeoutError:
             logger.error(f"Timeout acquiring SEARCH_SEM for {city} {term}. Skipping search.")
             metrics['serpapi_errors'].inc() # Use metrics dict
@@ -264,6 +268,7 @@ async def get_google_search_results(city, term, proxy_pool): # REMOVED: session 
             archived_search = GoogleSearch(retrieval_params).get_search_archive(search_id)
 
             if 'organic_results' in archived_search:
+                logger.debug(f"DEBUG: Organic results found for {city} {term} on attempt {attempt+1}") # DEBUG LOG - ORGANIC RESULTS FOUND
                 break
             await asyncio.sleep(2 ** attempt)
         else:
@@ -275,13 +280,13 @@ async def get_google_search_results(city, term, proxy_pool): # REMOVED: session 
 
 
         if 'organic_results' in archived_search:
-            logger.debug(f"Raw SerpAPI results: {archived_search['organic_results']}")
+            logger.debug(f"Raw SerpAPI results: {archived_search['organic_results']}") # DEBUG LOG - RAW RESULTS
             for result in archived_search['organic_results']:
                 url = result.get('link')
                 if url and utils.is_valid_url(url):
                     all_urls.append(url)
                     logger.debug(f"Accepted URL: {url}")
-            logger.info(f"Found {len(all_urls)} valid URLs for {city} {term}")
+            logger.info(f"Found {len(all_urls)} valid URLs for {city} {term}") # INFO LOG - URL COUNT
             utils.update_proxy_score(proxy_key, True) # Reward proxy on successful SerpAPI call
         else:
             logger.warning(f"No organic results in archived search for {city} {term}")
@@ -305,6 +310,7 @@ async def get_google_search_results(city, term, proxy_pool): # REMOVED: session 
         return {"city": city, "term": term, "urls": []}
     finally:
         GoogleSearch.SERPAPI_HTTP_PROXY = None
+        logger.debug(f"Exiting get_google_search_results for city={city}, term={term}, returning {len(all_urls)} urls") # DEBUG LOG - EXIT POINT
 
     return {"city": city, "term": term, "urls": all_urls}
 
@@ -313,41 +319,35 @@ def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database (now synchronous)."""
     try:
         # --- Data Validation ---
-        required_fields = ['website_url']  # Only require URL
-        if not data.website_url:
+        required_fields = ['url']  # Require URL as a minimum
+        if not data.url:  # Check data.url now
             logger.warning(f"Missing website URL, skipping insert")
             return False
         # --- End Data Validation ---
 
 
-        existing = supabase_client.table('property_managers') \
-            .select('website_url') \
-            .eq('website_url', str(data.website_url)) \
+        existing = supabase_client.table('property_manager_contacts') \
+            .select('url') \
+            .eq('url', str(data.url)) \
             .execute()
 
         if existing.data:
-            logger.warning(f"Duplicate URL skipped: {data.website_url}")
+            logger.warning(f"Duplicate URL skipped: {data.url}") # Log data.url
             return True
 
         data_for_supabase = {
-            'website_url': str(data.website_url),  # Direct attribute access
-            'social_media': data.social_media,      # Direct attribute access
-            'city': str(data.city or 'N/A'),       # Direct attribute access
-            'search_term': str(data.search_term or 'N/A'), # Direct attribute access
-            'company_name': str(data.company_name or 'N/A'), # Direct attribute access
-            'email_addresses': data.email_addresses, # Direct attribute access
-            'phone_numbers': data.phone_numbers,     # Direct attribute access
-            'physical_address': data.physical_address or 'N/A', # Direct attribute access
-            'relevance_score': data.relevance_score, # Direct attribute access
-            'estimated_properties': data.estimated_properties or 0, # Direct attribute access
-            'service_areas': data.service_areas,     # Direct attribute access
-            'management_software': data.management_software, # Direct attribute access
-            'license_numbers':  data.license_numbers, # Direct attribute access
-            'llm_category': data.llm_category      # Direct attribute access
+            'name': str(data.name or 'N/A'),             # Map data.name
+            'email': data.email,                         # Map data.email (already a list/array)
+            'phone_number': data.phoneNumber,             # Map data.phoneNumber (already a list/array)
+            'city': str(data.city or 'N/A'),             # Map data.city - from CITIES list now!
+            'url': str(data.url),                       # Map data.url
+            'search_keywords': data.searchKeywords,     # Map searchKeywords
+            # 'latLngPoint': None, # Skip latLngPoint for now
+            # 'lastEmailSentAt': None, # Skip lastEmailSentAt for now
         }
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
-        response = supabase_client.table('property_managers').insert(data_for_supabase).execute()
+        response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute() # Correct table name
 
         logger.debug(f"Supabase response: {str(response)[:200]}...") # Improved debug logging - truncated response
 
@@ -363,7 +363,7 @@ def save_to_supabase(supabase_client, data):
             logger.debug(f"Data Payload on success with no data: {data_for_supabase}") # Log payload on success with no data
             return False
 
-        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, website_url: {data.website_url}") # Improved success log - include id and URL
+        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, url: {data.url}") # Improved success log - include id and URL
         return True
         # --- END UPDATED ERROR CHECKING ---
 
@@ -372,37 +372,30 @@ def save_to_supabase(supabase_client, data):
         return False
 
 def save_to_csv(data_list, batch_number):
-    csv_filename = f"property_managers_data_batch_{batch_number}.csv"
-    logger.info(f"Saving batch {batch_number} data to CSV file: {csv_filename} (fallback)")
+    csv_filename = f"property_managers_data_batch_{batch_number}.csv" # You can rename this if you want
+    logger.info(f"Saving batch {batch_number} data to CSV file: {csv_filename}")
 
-    fieldnames = [
-        "city", "search term", "company name", "website_url", "email addresses",
-        "phone numbers", "physical address", "relevance score", "timestamp",
-        "social_media", "estimated_properties", "service_areas",
-        "management_software", "license_numbers",
-        "llm_category"
+    fieldnames = [ # Updated fieldnames to match schema
+        "name",
+        "email",
+        "phone_number",
+        "city",
+        "url",
+        "search_keywords",
+        # Removed old fields like "company_name", "website_url", etc.
     ]
+
     with open(csv_filename, mode='w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for data_item in data_list:
-            social_media_str = ", ".join([str(url) for url in data_item.social_media])
             writer.writerow({
-                "city": data_item.city or "N/A",
-                "search term": data_item.search_term or "N/A",
-                "company_name": data_item.company_name or "N/A",
-                "website_url": str(data_item.website_url),
-                "email_addresses": ", ".join(data_item.email_addresses),
-                "phone_numbers": ", ".join(data_item.phone_numbers),
-                "physical_address": data_item.physical_address or "N/A",
-                "relevance_score": data_item.relevance_score,
-                "timestamp": datetime.datetime.now().isoformat(),
-                "social_media": social_media_str,
-                "estimated_properties": data_item.estimated_properties or 0,
-                "service_areas": ", ".join(data_item.service_areas),
-                "management_software": ", ".join(data_item.management_software),
-                "license_numbers": ", ".join(data_item.license_numbers),
-                "llm_category": data_item.llm_category or "N/A"
+                "name": data_item.name,
+                "email": ", ".join(map(str, data_item.email)), # Ensure emails are strings before joining
+                "phone_number": ", ".join(data_item.phoneNumber),
+                "city": data_item.city,
+                "url": str(data_item.url) if data_item.url else "N/A", # Handle potential None for URL
+                "search_keywords": ", ".join(data_item.searchKeywords),
             })
 
 
@@ -413,6 +406,7 @@ async def main():
     print("DEBUG: PROXY_POOL from utils:", utils.get_proxy_pool()) # DEBUG: Print proxy pool
     utils.validate_proxy_config()
 
+    await utils.get_playwright_instance() # Initialize Playwright
 
     search_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
     crawl_semaphore = asyncio.Semaphore(CRAWL_CONCURRENCY)
@@ -457,27 +451,33 @@ async def main():
         for city in CITIES:
             for term in SEARCH_TERMS:
                 search_query = f"{city} {term}"
-                logger.info(f"Preparing SerpAPI search for: Query={search_query}")
+                logger.info(f"Preparing SerpAPI search for: Query={search_query}, City={city}, Term={term}") # INFO LOG - PREPARING SEARCH
                 async with SEARCH_SEM:
-                    search_tasks.append(get_google_search_results(city, search_query, proxy_pool_to_use))
+                    search_tasks.append(get_google_search_results(city, term, proxy_pool_to_use)) # Pass term separately
 
         logger.info("Awaiting SerpAPI search tasks...")
+        logger.debug(f"DEBUG: Search tasks initiated: {len(search_tasks)}") # DEBUG LOG - SEARCH TASKS COUNT
         search_results_list = await asyncio.gather(*search_tasks)
         logger.info("SerpAPI search tasks completed.")
+        logger.debug(f"DEBUG: Full search_results_list: {search_results_list}") # DEBUG LOG - FULL SEARCH RESULTS
 
         for search_results in search_results_list:
             logger.info(f"Processing search results for: {search_results['city']} {search_results['term']}")
             if search_results:
                 logger.info(f"Found {len(search_results['urls'])} URLs in SerpAPI results.")
+                logger.debug(f"DEBUG: URLs from SerpAPI: {search_results['urls']}") # DEBUG LOG - URLS FROM SERPAPI
                 for url in search_results["urls"]:
                     normalized_url = normalize_url(url)
-                    r_client.lpush('crawl_queue', json.dumps({"city": search_results["city"], "term": SEARCH_TERMS[0], "url": utils.normalize_url(url)}))
-                    logger.info(f"Added URL to queue: {normalized_url}")
+                    r_client.lpush('crawl_queue', json.dumps({"city": search_results["city"], "term": SEARCH_TERMS[0], "url": utils.normalize_url(url)})) # Using SEARCH_TERMS[0] as term in queue context
+                    logger.info(f"Added URL to queue: {normalized_url} for city: {search_results['city']}") # INFO LOG - URL ADDED TO QUEUE WITH CITY
+                    logger.debug(f"DEBUG: Full context added to queue: {json.dumps({'city': search_results['city'], 'term': SEARCH_TERMS[0], 'url': utils.normalize_url(url)})}") # DEBUG LOG - FULL CONTEXT ADDED
 
         url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
         logger.info(f"Initial URL queue populated with {len(url_contexts_queue)} URLs and saved to Redis.")
+        logger.debug(f"DEBUG: Initial URL queue contents (first 10): {url_contexts_queue[:10]}") # DEBUG LOG - QUEUE CONTENTS
     else:
         logger.info(f"Resuming from existing URL queue with {len(url_contexts_queue)} URLs.")
+        logger.debug(f"DEBUG: Resuming URL queue contents (first 10): {url_contexts_queue[:10]}") # DEBUG LOG - RESUMING QUEUE CONTENTS
 
 
     batch_number = 0
@@ -488,7 +488,6 @@ async def main():
         batch_size = BATCH_SIZES[current_batch_index]
         url_contexts_batch = []
 
-
         if (error_budget["failed"] / error_budget["total"]) > 0.25:
             logger.critical("Error budget exhausted (failure rate > 25%). Exiting crawler.")
             break
@@ -498,10 +497,12 @@ async def main():
             if url_context_str:
                 url_contexts_batch.append(json.loads(url_context_str))
 
+        logger.debug(f"DEBUG: URL batch to process: {url_contexts_batch}") # DEBUG LOG - URL BATCH
 
         await rate_limiter.wait()
 
         extracted_data_list = await process_urls_async(url_contexts_batch, proxy_pool_to_use, CRAWL_SEM)
+        logger.debug(f"DEBUG: Extracted data list after process_urls_async: {extracted_data_list}") # DEBUG LOG - EXTRACTED DATA LIST
 
 
         if extracted_data_list:
@@ -513,13 +514,13 @@ async def main():
                     try:
                         session = await get_session()
                         async with LLM_SEM:
-                            llm_categories_batch = await analyze_batch([item.website_url for item in llm_batch], session=session)
+                            llm_categories_batch = await analyze_batch([item.url for item in llm_batch], session=session) # Changed to item.url
 
                             for i, data_item in enumerate(llm_batch):
                                 if i < len(llm_categories_batch):
-                                    data_item.llm_category = llm_categories_batch[i]
+                                    data_item.thoughts = llm_categories_batch[i] # Use thoughts to store LLM category
                                 else:
-                                    logger.warning(f"LLM category missing for URL: {data_item.website_url}")
+                                    logger.warning(f"LLM category missing for URL: {data_item.url}") # Changed to item.url
 
                             logger.info(f"LLM analysis completed for a batch of {len(llm_batch)} URLs (placeholder).")
                     except Exception as e_llm_batch:
@@ -536,6 +537,7 @@ async def main():
         batch_number += 1
         current_batch_index += 1
         url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
+        logger.debug(f"DEBUG: Remaining URL queue length: {len(url_contexts_queue)}") # DEBUG LOG - REMAINING QUEUE LENGTH
 
 
     logger.info("Finished processing all URLs from queue.")
@@ -552,6 +554,7 @@ async def main():
     logger.info(f"Crawler finished. Total time: {duration:.2f} seconds.")
 
     await close_session()
+    await close_playwright() # Ensure Playwright is closed in main()
 
 
 async def test_rotation():
@@ -565,10 +568,23 @@ if __name__ == "__main__":
     print("Before asyncio.run(main())...")
     try:
         asyncio.run(main())
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            logger.error("Event loop closed error during main execution, likely during shutdown.")
+        else:
+            raise  # Re-raise other RuntimeErrors
     finally:
         print("Finally block executed, ensuring session closure...")
-        asyncio.run(close_session())
-        print("Session closed in finally block.")
+        try:
+            asyncio.run(close_session())
+            asyncio.run(utils.close_playwright()) # Close Playwright
+        except RuntimeError as e_close:
+            if "Event loop is closed" in str(e_close):
+                logger.error("Event loop already closed during final session/playwright closure.")
+            else:
+                logger.error(f"Error during final cleanup: {e_close}")
+
+        print("Session and Playwright closed in finally block.")
     print("After asyncio.run(main())...")
     # asyncio.run(test_rotation())
     # asyncio.run(test_metrics())

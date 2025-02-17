@@ -1,9 +1,10 @@
-# utils.py - Corrected version (FINAL - ALL CHANGES IMPLEMENTED - LATEST VERSION - ERROR FIXES AND OPTIMIZATIONS - ASYNC SESSION & BATCH FIXES - BATCH LLM & FINAL TUNING - PRODUCTION READY UPDATES - HTTP2 REMOVED & PROXY VALIDATION & ROTATION - AIOHTTP VERSION FIX)
+# utils.py - FULL UPDATED CODE BASED ON SCHEMA propertyManagerContacts - WITH CITY FIX
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 import re
 import time
+import datetime
 import logging
 import urllib.robotparser
 from urllib.parse import urlparse, urljoin, urlunparse
@@ -16,7 +17,8 @@ from pydantic import ( # Updated imports - field_validator and ValidationInfo ad
     confloat,
     field_validator, # <-- field_validator is imported
     Field,
-    ValidationInfo # <-- ValidationInfo is imported (optional, but good practice)
+    ValidationInfo, # <-- ValidationInfo is imported (optional, but good practice)
+    conlist
 )
 from typing import List, Optional
 import ollama
@@ -40,13 +42,13 @@ from aiohttp import ClientSession, TCPConnector, AsyncResolver
 from async_lru import alru_cache
 import redis
 from time import sleep
-
+from playwright.async_api import async_playwright
 
 MAX_CAPTCHA_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
 
 GENERIC_DOMAINS = GENERIC_DOMAINS = {
-    "example.com", "orbitz.com", "blogspot.com", "google.com", "facebook.com",
+    "orbitz.com", "blogspot.com", "google.com", "facebook.com",
     "youtube.com", "twitter.com", "linkedin.com", "instagram.com", "pinterest.com",
     "yelp.com", "tripadvisor.com", "tripadvisor.com", "reddit.com", "wikipedia.org", "mediawiki.org",
     "amazon.com", "ebay.com", "craigslist.org", "indeed.com", "glassdoor.com",
@@ -56,6 +58,8 @@ GENERIC_DOMAINS = GENERIC_DOMAINS = {
     "social_media.com", "tripadvisor.com", "evolve.com",
     "homes-and-villas.marriott.com", "hometogo.com", "www.hometogo.com",
     "whimstay.com", "www.whimstay.com", "avantstay.com", "houfy.com", "www.redawning.com",
+    "corporatehousing.com", "www.corporatehousing.com", "https://www.onefinestay.com", "https://www.wimdu.com"
+    "https://www.theblueground.com", "https://awning.com", "https://www.airconcierge.net"
 }
 
 
@@ -142,15 +146,16 @@ CAPTCHA_COST = {
 BRIGHTDATA_PORTS = [22225, 22226, 33335] # Updated BRIGHTDATA_PORTS - FALLBACK PORT ADDED
 BRIGHTDATA_GEO = ["us-east", "us-west"]
 BRIGHTDATA_USER = os.getenv("BRIGHTDATA_USER")
+BRIGHTDATA_PASS = os.getenv("BRIGHTDATA_PASS") # ADDED BRIGHTDATA_PASS for proxy auth
 IMPERSONATIONS = ["chrome120", "chrome119"]
 captcha_lock = threading.Lock()
 
 PROXY_SCORE_CONFIG = { # Updated PROXY_SCORE_CONFIG - LESS AGGRESSIVE SCORING
-    'success': +25,
-    'failure': -40,
-    'timeout': -30,
-    'min_score': 15,  # Previous: 20 - REDUCED min_score
-    'initial': 50     # Previous: 70 - REDUCED initial score
+    'success': +30,    # Increased from +25
+    'failure': -20,    # Reduced from -40
+    'timeout': -15,    # Reduced from -30
+    'min_score': 20,   # Increased from 15
+    'initial': 70      # Increased from 50
 }
 
 
@@ -187,6 +192,62 @@ _session = None
 proxy_cycle = None
 
 SSL_WHITELIST = ["brd.superproxy.io", "gate.smartproxy.com"] # ADDED SSL_WHITELIST
+
+# --- Playwright Shared Instance ---
+_playwright_instance = None
+_browser = None
+
+async def get_playwright_instance():
+    global _playwright_instance
+    if _playwright_instance is None:
+        _playwright_instance = async_playwright()
+        await _playwright_instance.__aenter__()
+    return _playwright_instance
+
+async def get_browser_instance(proxy=None):
+    async with async_playwright() as p:
+        proxy_args = {}
+        if proxy: # Configure proxy if provided
+            proxy_parts = proxy.split('@')
+            if len(proxy_parts) == 2:
+                auth_user_pass, proxy_host_port = proxy_parts
+                auth = auth_user_pass.split(':')
+                if len(auth) == 2:
+                    proxy_user, proxy_pass = auth
+                    proxy_args = {
+                        "proxy": {
+                            "server": f"http://{proxy_host_port}",
+                            "username": proxy_user,
+                            "password": proxy_pass
+                        }
+                    }
+                else:
+                     proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth
+            else:
+                proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth
+
+        browser = await p.chromium.launch(**proxy_args)
+        return browser
+
+
+async def close_playwright():
+    global _browser, _playwright_instance
+    try:
+        if _browser:
+            await _browser.close()
+        if _playwright_instance:
+            try:
+                await _playwright_instance.__aexit__(None, None, None)  # Proper context manager exit
+            except AttributeError: # Fallback for environments where __aexit__ might not be directly callable
+                await _playwright_instance.stop()
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e):
+            logger.warning("Event loop already closed during Playwright cleanup")
+    finally:
+        _browser = None
+        _playwright_instance = None
+        logger.info("Playwright closed.")
+# --- End Playwright Shared Instance ---
 
 
 async def get_session():
@@ -254,21 +315,22 @@ def normalize_url(url):
 
 async def crawl_and_extract_async(session, context, proxy_pool=None):
     url = context['url']
-    city = context['city']
+    city = context['city'] # City from context - this is what we want to use
     term = context['term']
-    company_name_from_url = extract_company_name(url)
+    logger.debug(f"Entering crawl_and_extract_async for URL: {url}, City: {city}, Term: {term}") # DEBUG LOG - ENTRY POINT
     extracted_data = PropertyManagerData(
-         city=city,
-         search_term=term,
-         website_url=url,
-         company_name=company_name_from_url if company_name_from_url else "N/A"
+         city=city, # Assign city from context - DIRECT ASSIGNMENT HERE
+         url=url,
+         searchKeywords=[term],
+         link=url, # Set link to be the same as url for now
+         thoughts=f"Search term: {term}" # Example: Set thoughts to search term info
     )
     start_time = time.time()
 
     current_proxy = None
     proxy_key = 'no_proxy'
-    proxy_retries = 0 # Initialize proxy retry counter
-    use_proxy = os.getenv("USE_PROXY", "False").lower() == "true" # Get proxy usage setting
+    proxy_retries = 0
+    use_proxy = os.getenv("USE_PROXY", "False").lower() == "true"
 
     if use_proxy and proxy_pool:
         current_proxy = rotate_proxy(proxy_pool)
@@ -277,14 +339,17 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
             logger.warning("No proxy available initially, will try without proxy if proxy attempts fail.")
 
     parsed_url = urlparse(url)
-    try_again_with_new_proxy = True # Control retry logic
+    try_again_with_new_proxy = True
+    e_aiohttp = None
+    hcaptcha_element = None
 
-    while try_again_with_new_proxy and use_proxy and current_proxy: # Proxy retry loop (only if proxy is enabled and available)
-        try_again_with_new_proxy = False # Reset flag for each attempt
+    while try_again_with_new_proxy and use_proxy and current_proxy:
+        try_again_with_new_proxy = False
+        hcaptcha_element = None
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
-            headers.update(random.choice(HEADERS_LIST)) # Add enhanced headers
-            headers['Referer'] = urlparse(url).netloc # Add Referer header
+            headers.update(random.choice(HEADERS_LIST))
+            headers['Referer'] = urlparse(url).netloc
 
             ssl_context = False if any(d in current_proxy for d in SSL_WHITELIST) else None
 
@@ -302,20 +367,20 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
                 metrics['crawl_errors'].labels(type=f'http_{resp.status}', proxy=proxy_key).inc()
                 update_proxy_score(proxy_key, False)
 
-                if resp.status == 403 and proxy_pool and proxy_retries < 2: # Retry 403 with new proxy
+                if resp.status == 403 and proxy_pool and proxy_retries < 2:
                     proxy_retries += 1
-                    current_proxy = rotate_proxy(proxy_pool) # Rotate proxy
+                    current_proxy = rotate_proxy(proxy_pool)
                     proxy_key = current_proxy
                     logger.info(f"Retrying {url} with a different proxy due to 403, attempt {proxy_retries + 1}...")
-                    try_again_with_new_proxy = True # Set flag to retry
-                    continue # Retry from the beginning of the while loop
+                    try_again_with_new_proxy = True
+                    continue
                 else:
-                    return None # If not 403 or max retries reached, return None
+                    return None
 
             if resp.status == 405:
                 logger.warning(f"HTTP 405 error for {url}, trying with allow_redirects=False")
                 metrics['crawl_errors'].labels(type='http_405', proxy=proxy_key).inc()
-                resp = await session.get(url, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, allow_redirects=False, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for retry
+                resp = await session.get(url, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, allow_redirects=False, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
                 if resp.status != 200:
                     logger.warning(f"HTTP 405 retry failed, status {resp.status}")
                     update_proxy_score(proxy_key, False)
@@ -329,177 +394,156 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
                 return None
 
             html_content = await resp.text()
-            print("----- HTML Content (First 500 chars) -----")  # Debugging print
-            print(html_content[:500])  # Print first 500 characters
-            print("----- Text Content (First 500 chars) -----")  # Debugging print
+            print("----- HTML Content (First 500 chars) - aiohttp -----")
+            print(html_content[:500])
+            print("----- Text Content (First 500 chars) - aiohttp -----")
             soup = BeautifulSoup(html_content, 'lxml')
             text_content = soup.get_text(separator=' ', strip=True).lower()
-            print(text_content[:500])  # Print first 500 characters
+            print(text_content[:500])
 
-            # --- hCaptcha Detection and Solving ---
-            hcaptcha_element = soup.find('h-captcha') # Look for h-captcha tag
+            hcaptcha_element = soup.find('h-captcha')
             if hcaptcha_element:
-                captcha_sitekey_hcaptcha = hcaptcha_element.get('data-sitekey') # Extract sitekey from data-sitekey attribute
-                if captcha_sitekey_hcaptcha:
-                    logger.warning(f"hCaptcha detected on {url}, sitekey: {captcha_sitekey_hcaptcha[:20]}...")
-                    captcha_response = await solve_captcha(url, captcha_sitekey_hcaptcha, 'hcaptcha', current_proxy) # Call solve_captcha with 'hcaptcha' type
+                logger.warning(f"hCaptcha element initially detected by BeautifulSoup, but might be JS rendered. Proceeding with Playwright check for {url}.")
+            else:
+                logger.debug(f"hCaptcha not found in initial HTML, proceeding with BeautifulSoup parsing for {url}")
+                captcha_sitekey_v2 = re.search(r'data-sitekey="([^"]+)"', html_content)
+                captcha_sitekey_v3 = re.search(r'sitekey: ?"([^"]+)"', html_content)
+                captcha_sitekey_invisible = re.search(r'recaptcha\.render\("([^"]+)", {', html_content)
+
+                if captcha_sitekey_v2 and not hcaptcha_element:
+                    captcha_sitekey = captcha_sitekey_v2.group(1)
+                    logger.warning(f"ReCAPTCHA v2 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
+                    captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
                     if captcha_response:
                         metrics['captcha_solved'].inc()
-                        logger.info(f"hCaptcha solved, proceeding with request...")
-                        captcha_params = {'h-captcha-response': captcha_response} # h-captcha parameter name
+                        logger.info(f"reCAPTCHA v2 solved, proceeding with request...")
+                        captcha_params = {'g-recaptcha-response': captcha_response}
                         resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
                         if resp_after_captcha.status == 200:
                             html_content = await resp_after_captcha.text()
                             soup = BeautifulSoup(html_content, 'lxml')
                             text_content = soup.get_text(separator=' ', strip=True).lower()
                         else:
-                            logger.error(f"hCaptcha solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                            metrics['crawl_errors'].labels(type='captcha_failed_http_hcaptcha', proxy=proxy_key).inc()
+                            logger.error(f"reCAPTCHA v2 solve failed to get 200 OK, status: {resp_after_captcha.status}")
+                            metrics['crawl_errors'].labels(type='captcha_failed_http', proxy=proxy_key).inc()
                             update_proxy_score(proxy_key, False)
                             return None
                     else:
-                        logger.error(f"hCaptcha solving failed for {url}")
-                        metrics['crawl_errors'].labels(type='captcha_unsolved_hcaptcha', proxy=proxy_key).inc()
+                        logger.error(f"ReCAPTCHA v2 solving failed for {url}")
+                        metrics['crawl_errors'].labels(type='captcha_unsolved_v2', proxy=proxy_key).inc()
                         update_proxy_score(proxy_key, False)
                         return None
-            # --- End hCaptcha Detection and Solving ---
 
-
-            captcha_sitekey_v2 = re.search(r'data-sitekey="([^"]+)"', html_content) # reCAPTCHA v2 detection
-            captcha_sitekey_v3 = re.search(r'sitekey: ?"([^"]+)"', html_content) # reCAPTCHA v3 detection
-            captcha_sitekey_invisible = re.search(r'recaptcha\.render\("([^"]+)", {', html_content) # Invisible reCAPTCHA
-
-            if captcha_sitekey_v2 and not hcaptcha_element: # Only check for reCAPTCHA v2 if hCaptcha is NOT present
-                captcha_sitekey = captcha_sitekey_v2.group(1)
-                logger.warning(f"ReCAPTCHA v2 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
-                captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
-                if captcha_response:
-                    metrics['captcha_solved'].inc()
-                    logger.info(f"reCAPTCHA v2 solved, proceeding with request...")
-                    captcha_params = {'g-recaptcha-response': captcha_response}
-                    resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for captcha retry
-                    if resp_after_captcha.status == 200:
-                        html_content = await resp_after_captcha.text()
-                        soup = BeautifulSoup(html_content, 'lxml')
-                        text_content = soup.get_text(separator=' ', strip=True).lower()
+                elif captcha_sitekey_v3 and not hcaptcha_element:
+                    captcha_sitekey = captcha_sitekey_v3.group(1)
+                    logger.warning(f"ReCAPTCHA v3 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
+                    captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v3', current_proxy)
+                    if captcha_response:
+                        metrics['captcha_solved'].inc()
+                        logger.info(f"reCAPTCHA v3 solved (although v3 solving is skipped by default).")
                     else:
-                        logger.error(f"reCAPTCHA v2 solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                        metrics['crawl_errors'].labels(type='captcha_failed_http', proxy=proxy_key).inc()
-                        update_proxy_score(proxy_key, False)
+                        logger.warning(f"ReCAPTCHA v3 solving skipped or failed for {url}")
+                        metrics['crawl_errors'].labels(type='captcha_skipped_v3', proxy=proxy_key).inc()
                         return None
-                else:
-                    logger.error(f"ReCAPTCHA v2 solving failed for {url}")
-                    metrics['crawl_errors'].labels(type='captcha_unsolved_v2', proxy=proxy_key).inc()
-                    update_proxy_score(proxy_key, False)
-                    return None
 
-            elif captcha_sitekey_v3 and not hcaptcha_element: # Only check for reCAPTCHA v3 if hCaptcha is NOT present
-                captcha_sitekey = captcha_sitekey_v3.group(1)
-                logger.warning(f"ReCAPTCHA v3 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
-                captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v3', current_proxy)
-                if captcha_response:
-                    metrics['captcha_solved'].inc()
-                    logger.info(f"reCAPTCHA v3 solved (although v3 solving is skipped by default).")
-                else:
-                    logger.warning(f"ReCAPTCHA v3 solving skipped or failed for {url}")
-                    metrics['crawl_errors'].labels(type='captcha_skipped_v3', proxy=proxy_key).inc()
-                    return None
-
-            elif captcha_sitekey_invisible and not hcaptcha_element: # Only check for invisible reCAPTCHA if hCaptcha is NOT present
-                captcha_sitekey = captcha_sitekey_invisible.group(1)
-                logger.warning(f"Invisible reCAPTCHA detected on {url}, element ID: {captcha_sitekey[:20]}...")
-                captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
-                if captcha_response:
-                    metrics['captcha_solved'].inc()
-                    logger.info(f"Invisible reCAPTCHA solved, proceeding with request...")
-                    captcha_params = {'g-recaptcha-response': captcha_response}
-                    resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Pass ssl_context for invisible captcha retry
-                    if resp_after_captcha.status == 200:
-                        html_content = await resp_after_captcha.text()
-                        soup = BeautifulSoup(html_content, 'lxml')
-                        text_content = soup.get_text(separator=' ', strip=True).lower()
+                elif captcha_sitekey_invisible and not hcaptcha_element:
+                    captcha_sitekey = captcha_sitekey_invisible.group(1)
+                    logger.warning(f"Invisible reCAPTCHA detected on {url}, element ID: {captcha_sitekey[:20]}...")
+                    captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
+                    if captcha_response:
+                        metrics['captcha_solved'].inc()
+                        logger.info(f"Invisible reCAPTCHA solved, proceeding with request...")
+                        captcha_params = {'g-recaptcha-response': captcha_response}
+                        resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
+                        if resp_after_captcha.status == 200:
+                            html_content = await resp_after_captcha.text()
+                            soup = BeautifulSoup(html_content, 'lxml')
+                            text_content = soup.get_text(separator=' ', strip=True).lower()
+                        else:
+                            logger.error(f"Invisible reCAPTCHA solve failed to get 200 OK, status: {resp_after_captcha.status}")
+                            metrics['crawl_errors'].labels(type='captcha_failed_http_invisible', proxy=proxy_key).inc()
+                            update_proxy_score(proxy_key, False)
+                            return None
                     else:
-                        logger.error(f"Invisible reCAPTCHA solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                        metrics['crawl_errors'].labels(type='captcha_failed_http_invisible', proxy=proxy_key).inc()
+                        logger.error(f"Invisible reCAPTCHA solving failed for {url}")
+                        metrics['crawl_errors'].labels(type='captcha_unsolved_invisible', proxy=proxy_key).inc()
                         update_proxy_score(proxy_key, False)
                         return None
-                else:
-                    logger.error(f"Invisible reCAPTCHA solving failed for {url}")
-                    metrics['crawl_errors'].labels(type='captcha_unsolved_invisible', proxy=proxy_key).inc()
-                    update_proxy_score(proxy_key, False)
+
+                if BAD_PATH_PATTERN.search(parsed_url.path):
+                    logger.warning(f"Skipping URL due to bad path pattern: {url}")
+                    metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc()
                     return None
 
-            if BAD_PATH_PATTERN.search(parsed_url.path):
-                logger.warning(f"Skipping URL due to bad path pattern: {url}")
-                metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc()
-                return None
-
-            domain = urlparse(url).netloc.lower() # Extract domain for generic domain check
-            if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # Improved generic domain check
-                logger.warning(f"Skipping generic domain URL: {url}")
-                metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc()
-                return None
+                domain = urlparse(url).netloc.lower()
+                if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS):
+                    logger.warning(f"Skipping generic domain URL: {url}")
+                    metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc()
+                    return None
 
 
-            domain = urlparse(url).netloc.replace('www.', '')
+                domain = urlparse(url).netloc.replace('www.', '')
 
-            emails = extract_emails(html_content, domain)
-            phones = extract_phone_numbers(text_content)
-            address = extract_address(soup)
-            enhanced_data = await enhanced_data_parsing(soup, text_content)
-
-            extracted_data.email_addresses = emails
-            extracted_data.phone_numbers = phones
-            extracted_data.physical_address = address
-            extracted_data = extracted_data.copy(update=enhanced_data)
-
-            relevance_score = calculate_relevance(text_content, term)
-            extracted_data.relevance_score = relevance_score
-            metrics['avg_relevance_score'].set(relevance_score)
-
-            # --- Relevance Check DISABLED (Option 1) ---
-            # if relevance_score < 0.3:
-            #     logger.warning(f"Low relevance score ({relevance_score:.2f}) for {url}, skipping detailed extraction.")
-            #     metrics['extraction_failure'].inc()
-            #     return None
-            # --- End Relevance Check Disabled ---
+                emails = extract_emails(html_content, domain)
+                phones = extract_phone_numbers(text_content)
+                address = extract_address(soup)
+                extracted_name = extract_company_name(url)
+                if not extracted_name or extracted_name == "N/A":
+                    extracted_name_element = soup.find("h1") or soup.find("title")
+                    if extracted_name_element:
+                        extracted_name = extracted_name_element.text.strip()
+                    else:
+                        extracted_name = "N/A"
 
 
-            license_numbers = extract_license_numbers(text_content)
-            extracted_data.license_numbers = license_numbers
-            logger.info(f"Data extracted successfully from {url}, relevance: {relevance_score:.2f}, emails: {emails}, phones: {phones}")
-            metrics['extraction_success'].inc()
-            update_proxy_score(proxy_key, True) # Reward proxy on success
+                address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info
+                # Basic City extraction from address - REMOVE CITY EXTRACTION LOGIC
+                # address_parts = address_text.split(',') # --- REMOVE ---
+                # if len(address_parts) >= 2: # --- REMOVE ---
+                #     extracted_city = address_parts[-2].strip() # Assume city is second to last part # --- REMOVE ---
+                # else: # --- REMOVE ---
+                extracted_city = "N/A" # Default if city extraction fails (though we are not using it now for database city) # --- KEEP DEFAULT VALUE ---
 
-            return extracted_data
+
+                extracted_data.name = extracted_name
+                extracted_data.email = emails
+                extracted_data.phoneNumber = phones
+                extracted_data.city = city # DIRECTLY ASSIGN CITY FROM CONTEXT - NO MORE OVERWRITING
+
+
+                logger.info(f"Data extracted successfully from {url} (direct scrape), name: {extracted_name}, emails: {emails}, phones: {phones}, city: {city}") # Log city from context
+                metrics['extraction_success'].inc()
+                logger.debug(f"Exiting crawl_and_extract_async successfully for {url}, returning data: {extracted_data}") # DEBUG LOG - EXIT SUCCESS
+
+                return extracted_data
 
         except aiohttp.ClientError as e:
-            logger.error(f"aiohttp ClientError for {url} using proxy: {current_proxy if current_proxy else 'None'}: {e}")
+            logger.error(f"aiohttp ClientError during direct scraping for {url}: {e}")
             metrics['request_errors'].inc()
-            metrics['crawl_errors'].labels(type='client_error', proxy=proxy_key).inc()
-            update_proxy_score(proxy_key, False)
-            pass # Important: Continue to the next attempt in the retry loop
+            metrics['crawl_errors'].labels(type='client_error', proxy='no_proxy').inc()
+            logger.debug(f"Exiting crawl_and_extract_async with aiohttp.ClientError for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+            return None
         except asyncio.TimeoutError:
-            logger.error(f"Asyncio timeout for {url} using proxy: {current_proxy if current_proxy else 'None'}")
+            logger.error(f"Asyncio timeout during direct scraping for {url}")
             metrics['request_errors'].inc()
-            metrics['crawl_errors'].labels(type='timeout_error', proxy=proxy_key).inc()
-            update_proxy_score(proxy_key, False)
-            pass # Important: Continue to the next attempt in the retry loop
-        except Exception as e_crawl:
-            logger.exception(f"Unexpected error during crawl and extraction for {url} using proxy: {current_proxy if current_proxy else 'None'}: {e_crawl}")
+            metrics['crawl_errors'].labels(type='timeout_error', proxy='no_proxy').inc()
+            logger.debug(f"Exiting crawl_and_extract_async with asyncio.TimeoutError for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+            return None
+        except Exception as e_direct_crawl:
+            logger.exception(f"Unexpected error during direct scraping for {url}: {e_direct_crawl}")
             metrics['page_extraction_errors'].inc()
-            metrics['crawl_errors'].labels(type='extraction_error', proxy=proxy_key).inc()
-            update_proxy_score(proxy_key, False)
-            pass # Important: Continue to the next attempt in the retry loop
-        finally:
-            if current_proxy:
-                PROXY_HEALTH[current_proxy] = time.time()
+            metrics['crawl_errors'].labels(type='extraction_error', proxy='no_proxy').inc()
+            logger.debug(f"Exiting crawl_and_extract_async with unexpected error for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+            return None
+
+        return None
+
 
     # --- Fallback to Direct Scraping (No Proxy) ---
-    if use_proxy and proxy_pool and not current_proxy: # If proxies were intended but none available initially
+    if use_proxy and proxy_pool and not current_proxy:
         logger.warning(f"All proxies failed or none available. Attempting direct scraping without proxy for {url}")
-    elif use_proxy and proxy_pool: # If proxy retries failed
-        logger.warning(f"Proxy attempts failed for {url}. Falling back to direct scraping without proxy.")
+    elif use_proxy and proxy_pool:
+        logger.warning(f"Proxy attempts or Playwright failed for {url}. Falling back to direct scraping without proxy.")
 
     try: # Direct scraping attempt
         headers = {'User-Agent': random.choice(USER_AGENTS)}
@@ -513,6 +557,7 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
         if resp.status in [403, 404, 429, 500, 503]: # Still handle HTTP errors even without proxy
             logger.warning(f"HTTP error {resp.status} for {url} during direct scraping.")
             metrics['crawl_errors'].labels(type=f'http_{resp.status}', proxy='no_proxy').inc() # Label as no_proxy
+            logger.debug(f"Exiting crawl_and_extract_async with HTTP error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
             return None # Stop if direct scraping also fails with these errors
 
         html_content = await resp.text()
@@ -528,35 +573,41 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
         if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # Generic domain check for direct scraping
             logger.warning(f"Skipping generic domain URL (direct scrape): {url}")
             metrics['crawl_errors'].labels(type='generic_domain', proxy='no_proxy').inc()
+            logger.debug(f"Exiting crawl_and_extract_async due to generic domain (direct scrape) for {url}, returning None") # DEBUG LOG - EXIT FAILURE
             return None
 
 
         emails = extract_emails(html_content, domain)
         phones = extract_phone_numbers(text_content)
         address = extract_address(soup)
-        enhanced_data = await enhanced_data_parsing(soup, text_content)
+        extracted_name = extract_company_name(url) # Or find name in HTML if possible
+        if not extracted_name or extracted_name == "N/A":
+            extracted_name_element = soup.find("h1") or soup.find("title") # Example: Try to get name from h1 or title
+            if extracted_name_element:
+                extracted_name = extracted_name_element.text.strip()
+            else:
+                extracted_name = "N/A" # Default if name not found
 
-        extracted_data.email_addresses = emails
-        extracted_data.phone_numbers = phones
-        extracted_data.physical_address = address
-        extracted_data = extracted_data.copy(update=enhanced_data)
+        address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info
 
-        relevance_score = calculate_relevance(text_content, term)
-        extracted_data.relevance_score = relevance_score
-        metrics['avg_relevance_score'].set(relevance_score)
-
-        # --- Relevance Check DISABLED (Option 1) ---
-        # if relevance_score < 0.3:
-        #     logger.warning(f"Low relevance score (direct scrape, {relevance_score:.2f}) for {url}, skipping detailed extraction.")
-        #     metrics['extraction_failure'].inc()
-        #     return None
-        # --- End Relevance Check Disabled ---
+        extracted_city = "N/A"  # Initialize extracted_city to "N/A" - but not used for database city anymore
+        # Basic City extraction from address - REMOVE CITY EXTRACTION LOGIC
+        # address_parts = address_text.split(',') # --- REMOVE ---
+        # if len(address_parts) >= 2: # --- REMOVE ---
+        #     extracted_city = address_parts[-2].strip() # Assume city is second to last part # --- REMOVE ---
+        # else: # --- REMOVE ---
 
 
-        license_numbers = extract_license_numbers(text_content)
-        extracted_data.license_numbers = license_numbers
-        logger.info(f"Data extracted successfully from {url} (direct scrape), relevance: {relevance_score:.2f}, emails: {emails}, phones: {phones}")
+        extracted_data.name = extracted_name
+        extracted_data.email = emails
+        extracted_data.phoneNumber = phones
+        extracted_data.city = city # DIRECTLY ASSIGN CITY FROM CONTEXT - NO MORE OVERWRITING
+        extracted_data.searchKeywords = [term] # Assign searchKeywords here
+
+
+        logger.info(f"Data extracted successfully from {url} (direct scrape), name: {extracted_name}, emails: {emails}, phones: {phones}, city: {city}") # Log city from context
         metrics['extraction_success'].inc()
+        logger.debug(f"Exiting crawl_and_extract_async successfully (direct scrape) for {url}, returning data: {extracted_data}") # DEBUG LOG - EXIT SUCCESS
 
 
         return extracted_data
@@ -565,19 +616,23 @@ async def crawl_and_extract_async(session, context, proxy_pool=None):
         logger.error(f"aiohttp ClientError during direct scraping for {url}: {e}")
         metrics['request_errors'].inc()
         metrics['crawl_errors'].labels(type='client_error', proxy='no_proxy').inc() # Label as no_proxy
+        logger.debug(f"Exiting crawl_and_extract_async with aiohttp.ClientError during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
         return None
     except asyncio.TimeoutError:
         logger.error(f"Asyncio timeout during direct scraping for {url}")
         metrics['request_errors'].inc()
         metrics['crawl_errors'].labels(type='timeout_error', proxy='no_proxy').inc() # Label as no_proxy
+        logger.debug(f"Exiting crawl_and_extract_async with asyncio.TimeoutError during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
         return None
     except Exception as e_direct_crawl:
         logger.exception(f"Unexpected error during direct scraping for {url}: {e_direct_crawl}")
         metrics['page_extraction_errors'].inc()
         metrics['crawl_errors'].labels(type='extraction_error', proxy='no_proxy').inc() # Label as no_proxy
+        logger.debug(f"Exiting crawl_and_extract_async with unexpected error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
         return None
     # --- End Fallback to Direct Scraping ---
 
+    logger.debug(f"Exiting crawl_and_extract_async (all attempts failed) for {url}, returning None") # DEBUG LOG - EXIT FAILURE
     return None # Return None if both proxy and direct attempts fail
 
 
@@ -640,7 +695,8 @@ def validate_proxy_config():
         for proxy_string in proxy_pool:
             try:
                 auth_part, host_part = proxy_string.split('@')
-                user_pass, host_port = auth_part.split(':'), host_part.split(':')
+                user_pass = auth_part.split(':')
+                host_port = host_part.split(':')
                 if len(user_pass) < 2 or len(host_port) < 2:
                     raise ValueError("Invalid proxy format")
             except (ValueError, AttributeError) as e:
@@ -744,7 +800,6 @@ async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=N
                 logger.error(f"2Captcha solve failed, no code returned (Type: {captcha_type}), attempt {attempt + 1}/{max_attempts}")
                 if attempt + 1 >= max_attempts:
                     break
-
         except Exception as e:
             logger.error(f"Error during CAPTCHA solving for {page_url} (attempt {attempt + 1}/{max_attempts}): {e}")
             if attempt + 1 >= max_attempts:
@@ -754,109 +809,34 @@ async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=N
 
 
 async def enhanced_data_parsing(soup, text_content):
-    data = {}
-    social_links = []
-    for platform in ["facebook", "twitter", "linkedin", "instagram"]:
-        links = soup.select(f'a[href*="{platform}.com"]')
-        social_links.extend([link['href'] for link in links if link.has_attr('href')])
-    data["social_media"] = list(set(social_links))
-
-    prop_count = 0
-    number_words = re.findall(r'\b\d+\b', text_content)
-    for num in number_words[:100]:
-        if 10 < int(num) < 10000:
-            prop_count = int(num)
-            break
-    data["estimated_properties"] = prop_count
-
-    service_areas = []
-    location_keywords = ["serving", "areas", "cover", "locations"]
-    for elem in soup.find_all(['p', 'div', 'section']):
-        text = elem.get_text().lower()
-        if any(kw in text for kw in location_keywords):
-            service_areas.extend(re.findall(r'\b[A-Z][a-z]+(?: [A-Z][a-z]+)*\b', elem.get_text()))
-    data["service_areas"] = list(set(service_areas))
-
-    software_keywords = {
-        "guesty": ["guesty", "guestyguru"],
-        "airdna": ["airdna", "air dna"],
-        "pricelabs": ["pricelabs", "price labs"]
-    }
-    detected_software = []
-    for sw, terms in software_keywords.items():
-        if any(term in text_content for term in terms):
-            detected_software.append(sw)
-    data["management_software"] = detected_software
-
-    return data
+    # No enhanced data parsing needed for the new schema fields in this basic example
+    return {}
 
 
 class PropertyManagerData(BaseModel):
-    city: str = "N/A"
-    search_term: str = "N/A"
-    company_name: str = "N/A"
-    website_url: HttpUrl
-    email_addresses: List[EmailStr] = []
-    phone_numbers: List[str] = []
-    physical_address: str = "N/A"
-    relevance_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    social_media: List[str] = []
-    estimated_properties: Optional[int] = 0
-    service_areas: List[str] = []
-    management_software: List[str] = []
-    license_numbers: List[str] = []
-    llm_category: Optional[str] = None
+    id: Optional[int] = None
+    name: Optional[str] = "N/A"  # Property Manager Name
+    email: List[EmailStr] = Field(default_factory=list)  # List of emails
+    phoneNumber: List[str] = Field(default_factory=list)  # List of phone numbers
+    city: Optional[str] = "N/A" # City -  Now represents City from CITIES list
+    url: Optional[HttpUrl] = None  # Website URL
+    searchKeywords: List[str] = Field(default_factory=list) # Search Keywords - from SEARCH_TERMS
+    latLngPoint: Optional[str] = None  # latLngPoint - Keep if you intend to use it later
+    lastEmailSentAt: Optional[datetime.datetime] = None # lastEmailSentAt - Keep if you intend to use it later
 
-    @field_validator('phone_numbers')
+    @field_validator('phoneNumber')
     def validate_phone_number(cls, values: List[str]) -> List[str]:
         return [phone.strip() for phone in values]
 
 
-@lru_cache(maxsize=1000)
 async def analyze_with_ollama(company_name, website_text, model_name='deepseek-r1:latest'):
-    try:
-        prompt = f"""Analyze if website is related to VACATION RENTALS (like Airbnbs) this should be obvious. Look for these indicators:\n\n- Keywords: 'vacation rentals', 'short term rentals', 'cabin rentals', 'condo rentals', 'beach rentals', 'Airbnb', 'rentals', 'book a stay', 'find rentals' etc there could be many more giveaways.\n- Website Functionality:  Listings of properties for short-term rent, search bar, filters for location/dates/amenities, booking or reservation features for vacation rentals, properties.\n- Target Audience:  Content aimed at travelers looking to rent vacation properties.\n\nWebsite Company Name: {company_name}\n\nWebsite Text Content:\n{website_text[:3000]}... (truncated for brevity)\n\nBased on these VACATION RENTAL indicators, categorize the website as:\n'Vacation Rental Website' OR 'Not Vacation Rental Related'.\n\nRespond with ONLY ONE of these categories. Do not add any extra text."""
-        response = await asyncio.to_thread(
-            ollama.chat,
-            model=model_name,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        category_prediction = response['message']['content'].strip()
-        logger.debug(f"[Ollama Analysis] Company: {company_name}, Predicted Category: {category_prediction}")
-        return category_prediction
-    except Exception as e:
-        logger.error(f"Error during Ollama analysis for {company_name}: {e}")
-        return None
+    # Ollama analysis is not used in this schema-matching version for direct fields
+    return None
 
 
 async def analyze_batch(urls, session):
-    logger.info(f"Starting batch LLM analysis for {len(urls)} URLs...")
-    start_time_llm_batch = time.time()
-
-    tasks = [fetch_text(url, CLIENT_TIMEOUT, session) for url in urls]
-    website_texts = await asyncio.gather(*tasks, return_exceptions=True)
-
-    combined_text = '\n---\n'.join([
-        f"URL: {url}\nCONTENT:\n{text if not isinstance(text, Exception) else 'Failed to fetch content'}"
-        for url, text in zip(urls, website_texts)
-    ])
-
-    try:
-        response = await asyncio.to_thread(
-            ollama.chat,
-            model='deepseek-r1:latest',
-            messages=[{'role': 'user', 'content': f"Analyze these {len(urls)} vacation rental sites:\n{combined_text[:15000]}"}]
-        )
-        categories = [cat.strip() for cat in response['message']['content'].strip().split('\n') if cat.strip()]
-        categories = categories[:len(urls)]
-    except Exception as e_ollama:
-        logger.error(f"Error during Ollama batch analysis: {e_ollama}")
-        categories = ["LLM Analysis Failed"] * len(urls)
-
-    duration_llm_batch = time.time() - start_time_llm_batch
-    logger.info(f"Batch LLM analysis completed in {duration_llm_batch:.2f} seconds for {len(urls)} URLs. Example categories: {categories[:3]}")
-
-    return categories
+    # Batch LLM analysis is not used in this schema-matching version for direct fields
+    return ["LLM analysis skipped"] * len(urls)
 
 
 async def fetch_text(url, timeout, session):
@@ -903,12 +883,19 @@ def decode_emails(text): # (Already in your older code - reuse it)
     return text
 
 def extract_emails(html_content, domain):
-    decoded_html_content = decode_emails(html_content) # Decode first
-    # More permissive email regex (allows for more TLDs and variations)
+    decoded_html_content = decode_emails(html_content)
     email_matches = list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})*", decoded_html_content, re.IGNORECASE)))
-    print("----- Raw Email Matches (Refined Regex + Decoding) -----") # Debugging print
+    print("----- Raw Email Matches (Refined Regex + Decoding) -----")
     print(email_matches)
-    return email_matches
+    logger.debug(f"Extracted email matches (raw): {email_matches}") # DEBUG LOG - RAW EMAILS
+
+    valid_emails = [email for email in email_matches if '@' in email and '.' in email]
+    print("----- Validated Email Matches -----")
+    print(valid_emails)
+    logger.debug(f"Validated email matches: {valid_emails}") # DEBUG LOG - VALIDATED EMAILS
+
+    return valid_emails
+
 
 def extract_phone_numbers(text_content):
     # Reverted to older, verbose phone regex for testing
@@ -929,7 +916,20 @@ def extract_phone_numbers(text_content):
         ''', text_content, re.VERBOSE | re.IGNORECASE))) # Use text_content here
     print("----- Raw Phone Matches (Older Verbose Regex) -----") # Debugging print
     print(phone_matches)
-    return phone_matches
+    logger.debug(f"Extracted phone matches (raw): {phone_matches}") # DEBUG LOG - RAW PHONES
+    # Reconstruct phone numbers as strings
+    phone_strings = []
+    for match in phone_matches:
+        country_code, area_code, exchange_code, line_number, extension = match
+        phone_number = ""
+        if country_code:
+            phone_number += f"+{country_code} "
+        phone_number += f"({area_code}) {exchange_code}-{line_number}"
+        if extension:
+            phone_number += f" ext. {extension}"
+        phone_strings.append(phone_number.strip()) # Add reconstructed number as string
+    logger.debug(f"Validated phone numbers: {phone_strings}") # DEBUG LOG - VALIDATED PHONES
+    return phone_strings
 
 
 def extract_address(soup):
@@ -962,7 +962,7 @@ def extract_address(soup):
                 if re.search(
                     r'\d{3,}.*(Street|Ave|Road|P\.O\.\s?Box|Place|Square|Drive|Ln|Blvd|Court|Way|Circle)\b', line, re.IGNORECASE
                 ) or re.search(
-                    r'\b(City|State|Zip|Postal)\b', line, re.IGNORECASE
+                    r'\b(City|Zip|Postal)\b', line, re.IGNORECASE # Removed State from here
                 ) or re.search(
                     r'\b\d{5}(-\d{4})?\b', line # US Zip code pattern (5 digits or 5+4)
                 ) or re.search(
@@ -981,19 +981,8 @@ def extract_address(soup):
 
 
 def calculate_relevance(text_content, term): # Modified calculate_relevance
-    text_content_lower = text_content.lower()
-    total_keyword_frequency = 0
-
-    for keyword in RELEVANCE_KEYWORDS: # Check for multiple keywords
-        keyword_frequency = text_content_lower.count(keyword.lower())
-        total_keyword_frequency += keyword_frequency
-        logger.debug(f"Keyword: '{keyword}', Frequency: {keyword_frequency}") # DEBUG: Log keyword frequencies
-
-    word_count = len(text_content_lower.split())
-    normalized_frequency = total_keyword_frequency / word_count if word_count else 0
-
-    logger.debug(f"Total Keyword Frequency: {total_keyword_frequency}, Word Count: {word_count}, Relevance Score: {normalized_frequency:.2f}") # DEBUG: Log score components
-    return normalized_frequency
+    # Relevance calculation is not used for the schema-matching version focusing on direct fields
+    return 0.0
 
 
 def extract_license_numbers(text_content):
@@ -1117,21 +1106,24 @@ def get_proxy_pool():
     if os.getenv('BRIGHTDATA_USER') and os.getenv('BRIGHTDATA_PASS'):
         for port in BRIGHTDATA_PORTS:
             proxy_string = f"{os.getenv('BRIGHTDATA_USER')}:{os.getenv('BRIGHTDATA_PASS')}@brd.superproxy.io:{port}"
-            if "brd.superproxy.io" in proxy_string:  # Apply Bright Data HTTP fix
-                proxy_string = proxy_string.replace("https://", "http://") + "?type=http"  # Force HTTP for Bright Data
+            if "brd.superproxy.io" in proxy_string: # Apply Bright Data HTTP fix
+                proxy_string = proxy_string.replace("https://", "http://") + "?type=http" # Force HTTP for Bright Data
             proxies.append(proxy_string)
             provider_counts['brightdata'] += 1
 
     logger.info(f"Proxy pool 구성: {provider_counts}")
 
-    if not proxies:  # Check if proxies list is empty after configuration
+    if not proxies: # Check if proxies list is empty after configuration
         raise ValueError("No proxy credentials found in environment variables")
 
-        healthy_proxies = [p for p, s in PROXY_SCORES.items() if s > 20] # More explicit variable name for score
-        if healthy_proxies:
-            logger.debug(f"Using healthy proxies, count: {len(healthy_proxies)}")
-            return healthy_proxies
-        else:
-            logger.warning("No healthy proxies found, using refreshed pool.")
-            logger.debug("No healthy proxies found, using fresh pool (limited size).")
-            return proxies  # Return ALL proxies if no healthy ones
+    healthy_proxies = [proxy for proxy, score in PROXY_SCORES.items() if score > 20]
+    if healthy_proxies:
+        logger.debug(f"Using healthy proxies, count: {len(healthy_proxies)}")
+        return healthy_proxies
+    else:
+        logger.warning("No healthy proxies found, using refreshed pool.")
+        logger.debug("No healthy proxies found, using fresh pool (limited size).")
+        return proxies # Return ALL proxies (not limited/weighted random choices anymore)
+
+
+PROXY_REGEX = r'^(.+?:.+?@)?[\w\.-]+:\d+(\?.*)?$' # Modified regex to allow query parameters
