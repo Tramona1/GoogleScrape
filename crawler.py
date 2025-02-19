@@ -1,3 +1,17 @@
+# crawler.py - FULL CODE WITH ALL IMPLEMENTED CHANGES
+import re
+import html # 2. Implement HTML Entity Decoding - IMPORT HTML
+
+# REMOVE THESE FUNCTIONS FROM CRAWLER.PY:
+# def normalize_phone(number): # 1. Add Phone Normalization - IMPLEMENT FUNCTION
+#     return re.sub(r'\D', '', number).lstrip('1')
+
+# # Implement HTML Entity Decoding
+# def decode_html_entities(text): # 2. Implement HTML Entity Decoding - IMPLEMENT FUNCTION
+#     return html.unescape(text)
+
+# Add Deduplication Logic - for phone numbers is done in extract_phone_numbers function below, for emails is done already using set in extract_emails
+
 print("Script execution started...")
 
 from dotenv import load_dotenv
@@ -12,14 +26,14 @@ import time
 import csv
 import logging
 import datetime
-import shelve # 12. Redis Queue Integration 📦 - REMOVED shelve import
+import shelve # 12. Redis Queue Integration ðŸ“¦ - REMOVED shelve import
 import json
 from supabase import create_client
 import utils  # Import utils
 from utils import (
     metrics, rotate_proxy, decay_proxy_scores, normalize_url,
     crawl_and_extract_async, analyze_batch, get_session, proxy_health_check, close_playwright, get_playwright_instance, # <-- ENSURE close_playwright and get_playwright_instance ARE HERE
-    BAD_PATH_PATTERN, GENERIC_DOMAINS, close_session, update_proxy_score, RateLimiter # <-- ENSURE decay_scores and update_proxy_score ARE HERE, and RateLimiter
+    BAD_PATH_PATTERN, GENERIC_DOMAINS, close_session, update_proxy_score, PROXY_SCORE_CONFIG # <-- ENSURE decay_scores AND update_proxy_score ARE HERE and PROXY_SCORE_CONFIG, curl_impersonated_request
 )
 from prometheus_client import start_http_server, Counter, Gauge, REGISTRY # MODIFIED: Import REGISTRY
 import random
@@ -33,7 +47,8 @@ from collections import defaultdict
 import traceback
 import async_timeout # Import async_timeout - ALREADY IMPORTED IN UTILS, BUT KEEPING HERE AS WELL FOR CLARITY IN CRAWLER
 from itertools import cycle  # Add this import at the top with other imports
-import redis # 12. Redis Queue Integration 📦 - ADDED redis import
+import redis # 12. Redis Queue Integration ðŸ“¦ - ADDED redis import
+import threading  # Add this import
 
 print("Imports completed...")
 
@@ -53,25 +68,52 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise EnvironmentError("SUPABASE_URL and SUPABASE_KEY environment variables must be set for database storage.")
 
 CITIES = [
-    # "Seattle",
-    # "San Diego",
-    "Arizona", # Note: "Arizona" is likely intended to be a city or region, but it's less specific
-    "Bellevue",
-]
+     # --- California - High Priority Cities (Larger Cities & Key Smaller Places) ---
+    
+    "Huntington Beach",
+    "Santa Monica",
+    "Malibu",
+    # "Temecula",
+    # "Oceanside",
+    # "San Clemente",
+    # "Dana Point",
+    # "Irvine",
+    # "Mission Viejo",
+    # "Riverside",
+    # "Ontario",
+    # "Laguna Beach",
+    # "Beverly Hills",
 
+    # "Oakland",
+    # "Berkeley",
+    # "San Jose",
+    # "Palo Alto",
+    # "Mountain View",
+    # "Napa",
+    # "Sonoma",
+    # "Monterey",
+    # "Carmel",
+    # "Santa Cruz",
+    # "South Lake Tahoe",
+    # "Redding",
+]
 
 SEARCH_TERMS = [
     "vacation rentals",
-    # "short term rentals",
-    "property managers short term rentals"
+    "short term rentals"
 ]
 
-# PAGES_PER_QUERY = 15 # This is not used for pagination anymore, pagination pages are defined in get_google_search_results
+PAGES_PER_QUERY = 15
 OUTPUT_CSV_FILENAME = "property_managers_data.csv"
-CONCURRENT_REQUESTS = 32 # Reduced Concurrent Requests - Point 6 - Concurrency Throttling - Reduced from 75 - Production Tuning
+CONCURRENT_REQUESTS = 10 # Reduced Concurrent Requests - Production Tuning
 LOG_LEVEL = logging.DEBUG
+# FIX 3: Content Length Requirements - Adjust length threshold:
+MIN_CONTENT_LENGTH = 300  # Allow shorter contact pages # Changed here from 1200 to 300
+# FIX 7: Internal Link Handling - Use config constant instead of hardcoded value
+MAX_DEPTH = 3 # FIX 4: Missing Internal Link Following - Added MAX_DEPTH here, if not already present
 
-USE_PROXY = os.getenv("USE_PROXY", "False").lower() == "true"
+
+USE_PROXY = os.getenv("USE_PROXY", "False").lower() == "false" # --- PROXY DISABLED ---
 PROXY_HOST = os.getenv("PROXY_HOST")
 PROXY_PORT = os.getenv("PROXY_PORT")
 PROXY_USER = os.getenv("PROXY_USER")
@@ -80,10 +122,10 @@ PROXY_PASSWORD = os.getenv("PROXY_PASSWORD")
 MAX_SEARCHES_PER_IP = 8
 BATCH_SIZE = 25 # Increased Batch Size - Production Tuning
 
-SEARCH_CONCURRENCY = 15  # Reduced from 20 - Production Tuning - Proportional to CONCURRENT_REQUESTS
-CRAWL_CONCURRENCY = CONCURRENT_REQUESTS  # Point 6 - Concurrency Throttling - Set Crawl concurrency to CONCURRENT_REQUESTS
-LLM_CONCURRENCY = 8     # Reduced from 10 - Production Tuning - Proportional to CONCURRENT_REQUESTS
-JITTER_PROCESS_URLS = (1, 3) # Concurrency Throttling - Point 6 - Jitter range for process_urls_async
+SEARCH_CONCURRENCY = 3  # Reduced from 20 - Production Tuning - Proportional to CONCURRENT_REQUESTS
+CRAWL_CONCURRENCY = 10  # Reduced from 100 - Production Tuning - Set to CONCURRENT_REQUESTS
+LLM_CONCURRENCY = 1     # Reduced from 10 - Production Tuning - Proportional to CONCURRENT_REQUESTS
+
 
 
 # --- End Configuration ---
@@ -113,7 +155,7 @@ supabase_client = create_client(
 
 search_count = defaultdict(int)
 
-proxy_pool_to_use = None
+proxy_pool_to_use = None # --- PROXY DISABLED ---
 current_proxy_index = 0
 
 # Define Semaphores - Define semaphores at the top level, before main()
@@ -122,48 +164,59 @@ CRAWL_SEM = asyncio.Semaphore(CRAWL_CONCURRENCY)
 LLM_SEM = asyncio.Semaphore(LLM_CONCURRENCY)
 
 
-def rotate_proxy_crawler():
-    global proxy_pool_to_use
+def rotate_proxy_crawler(proxy_pool_to_use): # Modified to accept proxy_pool_to_use
     return utils.rotate_proxy(proxy_pool_to_use) # Use imported rotate_proxy
+
+def should_use_proxies(proxy_pool_to_use): # Added should_use_proxies
+    return utils.should_use_proxies(proxy_pool_to_use) # Use imported should_use_proxies
 
 
 async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOVED: session parameter
     logger.debug(f"Entering process_urls_async with {len(url_contexts)} URLs") # DEBUG LOG - ENTRY POINT
-    jitter_delay = random.uniform(JITTER_PROCESS_URLS[0], JITTER_PROCESS_URLS[1]) # Concurrency Throttling - Point 6 - Jitter Delay
-    await asyncio.sleep(jitter_delay) # Concurrency Throttling - Point 6 - Jitter Delay
-
     async def controlled_crawl(context, proxy_pool, crawl_semaphore): # REMOVED: session parameter
         logger.debug(f"Entering controlled_crawl for URL: {context.get('url')}, City: {context.get('city')}") # DEBUG LOG - ENTRY POINT
         session = await get_session() # Get session from pool - SESSION POOLING - IMPORT FROM UTILS
-        try: # Error Recovery Flow - Point 7 - Add try-except block - Controlled Crawl
+        current_proxy = None
+        proxy_key = 'no_proxy'
+        use_proxy_for_crawl = False # --- PROXY DISABLED --- #should_use_proxies(proxy_pool) # Determine if proxies should be used for this crawl
+
+        if use_proxy_for_crawl and proxy_pool:
+            current_proxy = rotate_proxy_crawler(proxy_pool) # Use proxy rotation for crawling
+            proxy_key = current_proxy
+        else:
+            current_proxy = None # Explicitly set to None for direct crawl
+
+
+        try:
             async with crawl_semaphore:
                 url = context['url']
                 if not utils.validate_request(url):
-                    metrics['crawl_errors'].labels(type='invalid_url', proxy=proxy_pool[0] if proxy_pool else 'no_proxy').inc() # Using first proxy for labeling if pool exists
+                    metrics['crawl_errors'].labels(type='invalid_url', proxy=proxy_key).inc()
                     return None
-
-                logger.debug(f"Starting crawl_and_extract_async for {url}")
-                data = await crawl_and_extract_async(session, context, proxy_pool=proxy_pool) # Use imported function and pass session # Timeout Optimization - Point 2 - Wrapped with timeout in utils
-                logger.debug(f"Finished crawl_and_extract_async for {context['url']}, Data: {data}") # DEBUG LOG - DATA AFTER CRAWL_AND_EXTRACT
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                logger.debug(f"Starting crawl_and_extract_async for {url} with proxy: {proxy_key if proxy_key != 'no_proxy' else 'Direct'}")
+                data = await utils.crawl_and_extract_async(session, context, proxy_pool=None, current_proxy=None, depth=context.get('depth', 0))
+                if data is None:
+                    logger.warning(f"Extraction failed for URL: {url}")
+                    metrics['extraction_failure'].inc()
+                logger.debug(f"Finished crawl_and_extract_async for {context['url']}, Data: {data}")
                 print(f"DEBUG (controlled_crawl): Data extracted from {context['url']}: {data}")
-                if data and data.url: # Line 379 - Correct Indentation - CORRECTED .get() to attribute access
-                    # Supabase Insertion Fix - Ensure searchKeywords is populated from context and validate
-                    data.searchKeywords = [context['term']] # Ensure searchKeywords is populated from context
-                    if not data.url or not data.searchKeywords: # Validate required fields
-                        logger.error(f"Skipping invalid data - URL: {data.url}, Keywords: {data.searchKeywords}")
-                        return None
-
-                    db_saved = save_to_supabase(supabase_client, data) # Line 380 - Correct Indentation
-                    if not db_saved: # Line 381 - Correct Indentation
-                        save_to_csv( [data], context.get("batch_number", 0)) # Line 382 - Correct Indentation
-                    return data # Line 383 - Correct Indentation
-                print(f"DEBUG (controlled_crawl): Extraction failed for {context['url']}") # Line 384 - Correct Indentation
-                return None # Line 385 - Correct Indentation
-        except Exception as e_controlled_crawl: # Error Recovery Flow - Point 7 - Catch exceptions in controlled_crawl
-            logger.error(f"Exception in controlled_crawl for {context.get('url')}: {e_controlled_crawl}") # Error Recovery Flow - Point 7 - Log exception
-            metrics['crawl_errors'].labels(type='controlled_crawl_exception', proxy=proxy_pool[0] if proxy_pool else 'no_proxy').inc() # Error Recovery Flow - Point 7 - Metric for controlled_crawl errors
-            metrics['failed_urls'].inc() # Error Recovery Flow - Point 7 - Increment failed_urls counter
-            return None # Error Recovery Flow - Point 7 - Return None on exception
+                if data and data.url:
+                    db_saved = save_to_supabase(supabase_client, data)
+                    if not db_saved:
+                        save_to_csv([data], context.get("batch_number", 0))
+                    return data
+                print(f"DEBUG (controlled_crawl): Extraction failed for {context['url']}")
+                return None
+        except Exception as e_controlled_crawl:
+            if "Rate limit" in str(e_controlled_crawl):
+                logger.warning(f"Rate limit encountered in controlled_crawl for {context.get('url')}: {e_controlled_crawl}")
+                metrics['crawl_errors'].labels(type='rate_limit', proxy=proxy_key).inc()
+            if isinstance(e_controlled_crawl, aiohttp.ClientProxyConnectionError):
+                logger.warning(f"Proxy connection error in controlled_crawl for {context.get('url')}: {e_controlled_crawl}. Continuing without proxy if direct scrape fails.")
+            logger.exception(f"Exception in controlled_crawl for {context.get('url')}: {e_controlled_crawl}")
+            metrics['crawl_errors'].labels(type='exception', proxy=proxy_key).inc()
+            return None
 
 
     extracted_data_list = []
@@ -171,7 +224,7 @@ async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOV
     async def controlled_crawl_wrapper(context, proxy_pool, crawl_semaphore): # REMOVED: session parameter
         return await controlled_crawl(context, proxy_pool, crawl_semaphore) # REMOVED: session parameter
 
-    try: # Error Recovery Flow - Point 7 - Add try-except block - process_urls_async
+    try:
         tasks = [controlled_crawl_wrapper(context, proxy_pool, crawl_semaphore) for context in url_contexts] # REMOVED: session parameter
         results = await asyncio.gather(*tasks, return_exceptions=True)
         logger.debug(f"DEBUG: (process_urls_async): Results from asyncio.gather: {results}") # DEBUG LOG - ASYNCIO.GATHER RESULTS
@@ -180,198 +233,250 @@ async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOV
         logger.debug(f"DEBUG: Exiting process_urls_async, returning: {extracted_data_list}") # DEBUG LOG - EXITING FUNCTION
         print("DEBUG: Exiting process_urls_async, returning:", extracted_data_list)
         return extracted_data_list
-    except Exception as e_process_urls: # Error Recovery Flow - Point 7 - Catch exceptions in process_urls_async
-        logger.error(f"Exception in process_urls_async: {e_process_urls}") # Error Recovery Flow - Point 7 - Log exception
-        metrics['crawl_errors'].labels(type='process_urls_exception', proxy=proxy_pool[0] if proxy_pool else 'no_proxy').inc() # Error Recovery Flow - Point 7 - Metric for process_urls_async errors
-        metrics['failed_urls'].inc(len(url_contexts)) # Error Recovery Flow - Point 7 - Increment failed_urls counter for all URLs in batch
-        return None # Error Recovery Flow - Point 7 - Return None on exception
+    except Exception as e_process_urls:
+        logger.exception(f"Exception in process_urls_async: {e_process_urls}")
+        return None
 
 
-@retry(
-    stop=stop_after_attempt(3), # Retry up to 3 times
-    wait=wait_exponential(multiplier=1, min=4, max=30), # Exponential backoff (4s, 8s, 16s, up to 30s)
-    retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)), # Retry on these exceptions
-    reraise=True # If all retries fail, raise the last exception
-)
-async def get_google_search_results(city, term, proxy_pool): # SerpAPI Pagination Fix # Timeout Optimization - Point 2 - Not wrapping SerpAPI calls with timeout - using retry instead
+async def get_google_search_results(city, term, proxy_pool):
     global search_count, proxy_pool_to_use, current_proxy_index
-    logger.debug(f"Entering get_google_search_results for city={city}, term={term}") # DEBUG LOG - ENTRY POINT
+    logger.debug(f"Entering get_google_search_results for city={city}, term={term}")
     all_urls = []
-    next_page_token = None  # SerpAPI Pagination Fix
-    page_num = 0 # Initialize page_num for logging
-    max_pages = 7  # Scrape 7 pages per search # Pagination Fix - Increased max_pages from 1 to 7
-    while True: # SerpAPI Pagination Fix
-        if page_num >= max_pages: # --- ADD THIS CHECK ---
-            logger.info(f"Pagination: Reached max page limit ({max_pages} pages). Stopping pagination.") # --- NEW LOG ---
-            break # Stop pagination if max pages reached # --- ADD THIS BREAK ---
+    next_page_url = None  # Initialize next_page_url
+    page_num = 1 # Track page number for logging
 
-        params = {
-            "engine": "google",
-            "q": f"{term} in {city}",
-            "gl": "us",
-            "hl": "en",
-            "num": "100",  # Max results per page # SerpAPI Pagination Fix
-            "api_key": SERPAPI_API_KEY,
-            "async": True,
-            "no_cache": True,
-            "location": city,
-            "google_domain": "google.com", # SerpAPI Parameter Optimization
-            "device": "desktop", # SerpAPI Parameter Optimization
-            "filter": "0",  # Disable auto-filtering # SerpAPI Parameter Optimization
-            "safe": "active"  # For compliance # SerpAPI Parameter Optimization
-        }
+    params = {
+        "engine": "google",
+        "q": f'"{term}" "{city}"',  # Add quotes for exact phrase matching
+        "gl": "us",
+        "hl": "en",
+        "num": 150,  # Reduced num for testing - Reduced num for testing - Reduced num for testing
+        "api_key": SERPAPI_API_KEY,
+        "async": True,
+        "no_cache": True,
+        "exclude_domains": ".gov" # Filter out .gov domains
+    }
+    params['exclude_domains'] = ".gov" # Filter out .gov domains
+    current_proxy = None
+    proxy_key = 'no_proxy'
+    use_proxy_for_serpapi = False # --- PROXY DISABLED --- #should_use_proxies(proxy_pool)
 
-        if next_page_token: # SerpAPI Pagination Fix
-            params["serpapi_pagination"] = next_page_token # SerpAPI Pagination Fix
-        else:
-            params["start"] = page_num * 100  # Only for initial page # SerpAPI Pagination Fix
 
-        current_proxy = None
-        proxy_key = 'no_proxy'
+    if USE_PROXY and use_proxy_for_serpapi and proxy_pool and len(proxy_pool) > 0:
+        current_proxy = rotate_proxy_crawler(proxy_pool)
+        proxy_key = current_proxy
 
-        if USE_PROXY and proxy_pool and len(proxy_pool) > 0:
-            current_proxy = utils.rotate_proxy(proxy_pool)
-            proxy_key = current_proxy
+    try:
+        GoogleSearch.SERPAPI_HTTP_PROXY = None
 
-            if search_count[proxy_key] >= MAX_SEARCHES_PER_IP:
-                logger.warning(f"Search limit reached for proxy: {current_proxy}. Rotating...")
-                current_proxy = rotate_proxy_crawler()
-                if current_proxy:
-                    proxy_key = current_proxy
-                else:
-                    logger.warning("No proxies available after rotation, skipping search for this city/term.")
-                    return {"city": city, "term": term, "urls": []}
+        while page_num <= PAGES_PER_QUERY: # Paginate up to PAGES_PER_QUERY (e.g., 15)
+            logger.info(f"Fetching SerpAPI page {page_num} for {city} {term}...") # Log page number
+            if next_page_url: # Use next_page_url if available (for pagination)
+                search = GoogleSearch({"api_key": SERPAPI_API_KEY, "async": True, "no_cache": True, "url": next_page_url}) # Use 'url' param for pagination
+            else: # Initial search
+                search = GoogleSearch(params)
 
-        try:
-            if USE_PROXY and current_proxy:
-                GoogleSearch.SERPAPI_HTTP_PROXY = f"https://{current_proxy}"
-                logger.debug(f"SerpAPI search using proxy: {current_proxy}, Page {page_num + 1}") # Added page number to log
-            else:
-                GoogleSearch.SERPAPI_HTTP_PROXY = None
-                logger.debug(f"SerpAPI search without proxy, Page {page_num + 1}") # Added page number to log
-
-            logger.debug(f"DEBUG: API Key being used for SerpAPI search (Page {page_num + 1}): {params['api_key']}") # Keep existing log
-            logger.debug(f"DEBUG: SerpAPI Query (Page {page_num + 1}): {params['q']}") # DEBUG LOG - SERPAPI QUERY - **CONFIRM CITY HERE**
-            try:
-                async with async_timeout.timeout(45): # Timeout Optimization - Point 2 - Timeout for acquiring SEARCH_SEM - Reduced from utils CLIENT_TIMEOUT
+            try: # Apply SEARCH_SEM with timeout
+                async with async_timeout.timeout(45):
                     async with SEARCH_SEM:
                         search = GoogleSearch(params)
-                        initial_result = await asyncio.to_thread(search.get_dict)
-                        logger.debug(f"DEBUG: Initial SerpAPI result metadata (Page {page_num + 1}): {initial_result.get('search_metadata')}")
+                        time.sleep(10) # <--- ADD THIS DELAY - Delay before get_dict
+                        results = await asyncio.to_thread(search.get_dict)
+                        logger.debug(f"Raw SerpAPI response: {json.dumps(results, indent=2)}") # <--- ADDED DEBUG LOGGING HERE - Raw response logging
+                        if 'error' in results: # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
+                            logger.error(f"SerpAPI error for query '{city} {term}', page {page_num}: {results['error']}") # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
+                            metrics['serpapi_errors'].inc() # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
+                            break # Stop pagination on error
 
-                        # --- ADD THESE DEBUG LOGS ---
-                        logger.debug(f"DEBUG: Raw initial_result (Page {page_num + 1}): {initial_result}") # Log the ENTIRE raw initial_result
-                        try:
-                            logger.debug(f"DEBUG: Pretty initial_result (Page {page_num + 1}):\n{json.dumps(initial_result, indent=2)}") # Pretty print for readability
-                        except Exception as e_json:
-                            logger.error(f"DEBUG: Error pretty printing initial_result: {e_json}")
-                        # --- END ADDED DEBUG LOGS ---
+
+                        # Wait for async results to complete
+                        if results.get("search_metadata", {}).get("status") == "Processing":
+                            json_endpoint = results["search_metadata"]["json_endpoint"]
+                            retries = 0
+                            while retries < 5 and results.get("search_metadata", {}).get("status") == "Processing":
+                                await asyncio.sleep(2)
+                                results = await fetch_serpapi_json(json_endpoint)
+                                retries += 1
+
 
             except asyncio.TimeoutError:
-                logger.error(f"Timeout acquiring SEARCH_SEM for {city} {term}, Page {page_num + 1}. Skipping page.")
+                logger.error(f"Timeout in SEARCH_SEM for {city} {term}, page {page_num}. Skipping page.")
                 metrics['serpapi_errors'].inc()
                 serpapi_usage["failed_searches"] += 1
-                continue # Skip to the next page if timeout
+                break # Skip to next city/term
 
-            if 'search_metadata' not in initial_result:
-                logger.error(f"SerpAPI search failed for {city} {term}, Page {page_num + 1}: No metadata in response")
-                serpapi_usage["failed_searches"] += 1
-                if USE_PROXY and current_proxy:
-                    utils.update_proxy_score(proxy_key, False)
-                continue # Skip to the next page if no metadata
-
-            if initial_result['search_metadata'].get('status') == ' ক্যাপচা ':
-                logger.warning(f"SerpAPI returned CAPTCHA for {city} {term}, Page {page_num + 1} using proxy: {current_proxy}")
+            if 'search_metadata' not in results or results['search_metadata'].get('status') == ' à¦•à§à¦¯à¦¾à¦ªà¦šà¦¾ ':
+                logger.warning(f"SerpAPI CAPTCHA or error on page {page_num} for {city} {term}. Stopping pagination.")
                 metrics['captcha_requests'].inc()
                 metrics['captcha_failed'].inc()
-                if USE_PROXY and current_proxy:
-                    utils.update_proxy_score(proxy_key, False)
-                continue # Skip to the next page if CAPTCHA
+                if USE_PROXY and current_proxy and use_proxy_for_serpapi:
+                    utils.update_proxy_score(proxy_key, False) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
+                break # Stop pagination
 
-            search_id = initial_result['search_metadata']['id']
-            logger.debug(f"DEBUG: Search ID after submission (Page {page_num + 1}): {search_id}")
-            logger.info(f"Search ID {search_id} (Page {page_num + 1}) submitted. Waiting 10 seconds for results...")
-            await asyncio.sleep(10)
+            original_url_count = 0
+            filtered_urls = []
+            removed_domains = set()
 
-            max_retries = 3
-            archived_search = None # Initialize outside the loop
-            for attempt in range(max_retries):
-                retrieval_url = f"https://serpapi.com/searches/{search_id}.json"
-                retrieval_params = {
-                    "api_key": SERPAPI_API_KEY,
-                }
-                param_string = "&".join([f"{key}={value}" for key, value in retrieval_params.items()])
-                full_retrieval_url = f"{retrieval_url}?{param_string}"
-                logger.debug(f"DEBUG: Full Retrieval URL (Page {page_num + 1}, Attempt {attempt+1}): {full_retrieval_url}")
-                logger.debug(f"DEBUG: Retrieval Search ID (Page {page_num + 1}, Attempt {attempt+1}): {search_id}")
+            # Process results only when status is "Success"
+            if results.get("search_metadata", {}).get("status") == "Success" and 'organic_results' in results:
+                organic_results = results['organic_results']
+                original_url_count = len(organic_results)
 
-                archived_search = GoogleSearch(retrieval_params).get_search_archive(search_id)
-
-                if 'organic_results' in archived_search:
-                    logger.debug(f"DEBUG: Organic results found for {city} {term}, Page {page_num + 1} on attempt {attempt+1}")
-                    break
-                await asyncio.sleep(2 ** attempt)
-            else:
-                logger.error(f"Max retries reached for {search_id}, Page {page_num + 1}")
-                serpapi_usage["failed_searches"] += 1
-                if USE_PROXY and current_proxy:
-                    utils.update_proxy_score(proxy_key, False)
-                continue # Skip to the next page if retrieval fails
-
-            if 'organic_results' in archived_search:
-                logger.debug(f"Raw SerpAPI results (Page {page_num + 1}): {archived_search['organic_results']}")
-                for result in archived_search['organic_results']:
+                for result in organic_results:
                     url = result.get('link')
                     if url and utils.is_valid_url(url):
-                        all_urls.append(url)
-                        logger.debug(f"Accepted URL (Page {page_num + 1}): {url}, City: {city}, Term: {term}") # DEBUG LOG - ACCEPTED URL - **CONFIRM CITY HERE**
-                logger.info(f"Found {len(archived_search['organic_results'])} URLs on page {page_num + 1} for {city} {term}") # Updated log message
-                utils.update_proxy_score(proxy_key, True)
+                        domain = urlparse(url).netloc.lower().replace('www.', '')
+                        if domain in GENERIC_DOMAINS:
+                            removed_domains.add(domain)
+                            logger.debug(f"SerpAPI Filter - Generic Domain: {url} - Domain: {domain}") # DEBUG LOG - GENERIC DOMAIN FILTER
+                            continue
+                        if utils.BAD_PATH_PATTERN.search(urlparse(url).path):
+                            continue
+                        filtered_urls.append(url)
+
+                logger.info(f"Page {page_num} URLs after filter: {len(filtered_urls)}/{original_url_count}")
+                logger.debug(f"Page {page_num} Removed domains: {removed_domains}")
+                all_urls.extend(filtered_urls)
+
+                # --- UPDATED PAGINATION CHECK HERE ---
+                if results.get('serpapi_pagination', {}).get('next'): # Use 'serpapi_pagination' and .get('next') # Pagination fix
+                    next_page_url = results['pagination']['next_link'] # Keep extracting 'next_link'
+                    logger.debug(f"Pagination link found for page {page_num}: {next_page_url}")
+                    page_num += 1
+                else:
+                    logger.info(f"No more pagination links after page {page_num} for {city} {term}.")
+                    break
+
+                if USE_PROXY and current_proxy and use_proxy_for_serpapi:
+                    utils.update_proxy_score(proxy_key, True) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
             else:
-                logger.warning(f"No organic results in archived search for {city} {term}, Page {page_num + 1}")
-                if USE_PROXY and current_proxy:
-                    utils.update_proxy_score(proxy_key, False)
+                logger.warning(f"No organic results on page {page_num} for {city} {term}.")
+                if USE_PROXY and current_proxy and use_proxy_for_serpapi:
+                    utils.update_proxy_score(proxy_key, False) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
+
 
             serpapi_usage["total_searches"] += 1
             search_count[proxy_key] += 1
-
-            if "pagination" in initial_result and "next_page_token" in initial_result["pagination"]: # SerpAPI Pagination Fix
-                next_page_token = initial_result["pagination"]["next_page_token"] # SerpAPI Pagination Fix
-                page_num += 1 # Increment page number # SerpAPI Pagination Fix
-                logger.info(f"Pagination: Next page token found, moving to page {page_num + 1}") # SerpAPI Pagination Fix
-            else:
-                logger.info("Pagination: No next page token found, stopping pagination.") # SerpAPI Pagination Fix
-                break # Stop pagination if no next page token # SerpAPI Pagination Fix
+            if 'search_metadata' in results and results['search_metadata'].get('search_information', {}).get('status_code') in [429, 503]:
+                logger.warning(f"SerpAPI capacity issue on page {page_num} for {city} {term}. Waiting 60s...")
+                await asyncio.sleep(60)
+                metrics['rate_limit_errors'].inc() # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
 
 
-            if 'search_metadata' in initial_result and 'search_information' in initial_result.get('search_metadata', {}):
-                if initial_result['search_metadata']['search_information'].get('status_code') in [429, 503]:
-                    logger.warning(f"SerpAPI capacity issue: {initial_result['search_metadata']['search_information'].get('status_code')} for {city} {term}, Page {page_num + 1}. Waiting 60s...")
-                    await asyncio.sleep(60)
+        # --- PAGINATION CHECK MOVED INSIDE 'organic_results' block --- (already done above)
 
+    except Exception as e:
+        logger.error(f"Error in get_google_search_results for {city} {term}: {traceback.format_exc()}")
+        metrics['serpapi_errors'].inc()
+        serpapi_usage["failed_searches"] += 1
+        if USE_PROXY and current_proxy and use_proxy_for_serpapi:
+            utils.update_proxy_score(proxy_key, False) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
+    finally:
+        GoogleSearch.SERPAPI_HTTP_PROXY = None
+        logger.debug(f"Exiting get_google_search_results for city={city}, term={term}, returning {len(all_urls)} urls")
 
-        except Exception as e:
-            logger.error(f"Inner SerpAPI search call failed for {city} {term}, Page {page_num + 1}: {traceback.format_exc()}")
-            metrics['serpapi_errors'].inc()
-            serpapi_usage["failed_searches"] += 1
-            if USE_PROXY and current_proxy:
-                utils.update_proxy_score(proxy_key, False)
-            continue # Skip to the next page if error
-        finally:
-            GoogleSearch.SERPAPI_HTTP_PROXY = None
-
-    logger.info(f"Collected {len(all_urls)} URLs across pages for {city} {term}") # Summary log - Updated log message
-    logger.debug(f"Exiting get_google_search_results for city={city}, term={term}, returning {len(all_urls)} urls")
     return {"city": city, "term": term, "urls": all_urls}
+
+async def fetch_serpapi_json(endpoint):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(endpoint) as response: # Added 'as response'
+            return await response.json()
+
+
+async def process_pagination(next_page_url, city, term, original_query): # --- Pagination Fix: Add original_query parameter ---
+    """
+    Processes pagination URLs from SerpAPI to fetch more results.
+    """
+    all_urls = []
+    page_num = 2 # Start page number at 2 for logging
+
+    while next_page_url and page_num <= PAGES_PER_QUERY: # --- Pagination Fix: Limit pagination pages ---
+        logger.info(f"Fetching SerpAPI pagination page {page_num} for {city} {term}: {next_page_url}") # MODIFIED: Include city and term in log
+        params = {
+            "engine": "google",
+            "q": original_query,  # --- Pagination Fix: Use original query ---
+            "start": (page_num - 1) * 10, # --- Pagination Fix: Use start parameter ---
+            "api_key": SERPAPI_API_KEY,
+            "async": True,
+            "no_cache": True
+        }
+        current_proxy = None
+        proxy_key = 'no_proxy'
+        use_proxy_for_serpapi = False # --- PROXY DISABLED --- #should_use_proxies(proxy_pool)
+
+        # if USE_PROXY and use_proxy_for_serpapi and proxy_pool:
+        #     current_proxy = rotate_proxy_crawler(proxy_pool)
+        #     proxy_key = current_proxy
+
+        try:
+            GoogleSearch.SERPAPI_HTTP_PROXY = None # Ensure SerpAPI uses its own proxy
+
+            async with async_timeout.timeout(45): # Timeout for pagination requests
+                async with SEARCH_SEM:
+                    search = GoogleSearch(params)
+                    results = await asyncio.to_thread(search.get_dict) # --- Pagination Fix: Use get_dict instead of search ---
+                    if 'error' in results: # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
+                        logger.error(f"SerpAPI error for pagination query '{city} {term}', page {page_num}: {results['error']}") # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
+                        metrics['serpapi_errors'].inc() # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
+                        break # Stop pagination on error
+
+
+            original_url_count = 0
+            filtered_urls = []
+            removed_domains = set()
+
+            if 'organic_results' in results:
+                organic_results = results['organic_results']
+                original_url_count = len(organic_results)
+
+                for result in organic_results:
+                    url = result.get('link')
+                    if url and utils.is_valid_url(url):
+                        domain = urlparse(url).netloc.lower().replace('www.', '')
+                        if domain in GENERIC_DOMAINS:
+                            removed_domains.add(domain)
+                            continue
+                        if utils.BAD_PATH_PATTERN.search(urlparse(url).path):
+                            continue
+                        filtered_urls.append(url)
+
+                logger.info(f"Pagination page {page_num} URLs after filter: {len(filtered_urls)}/{original_url_count}")
+                logger.debug(f"Pagination page {page_num} Removed domains: {removed_domains}")
+                all_urls.extend(filtered_urls)
+
+                if 'pagination' in results and 'next' in results['pagination']:
+                    next_page_url = results['pagination']['next'] # --- Keep next_page_url extraction for now, but might not be needed ---
+                    logger.debug(f"Found next pagination link for page {page_num}: {next_page_url}")
+                else:
+                    next_page_url = None # No more pagination
+            else:
+                logger.warning(f"No organic results in pagination page {page_num} for {city} {term}")
+                next_page_url = None # Stop pagination if no results
+
+        except Exception as e_page:
+            logger.error(f"Error fetching pagination page {page_num} for {city} {term}: {e_page}")
+            next_page_url = None # Stop pagination on error
+        finally:
+            page_num += 1
+            GoogleSearch.SERPAPI_HTTP_PROXY = None # Reset proxy
+
+    logger.info(f"Fetched {len(all_urls)} URLs from pagination for {city} {term}")
+    return all_urls
 
 
 def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database (now synchronous)."""
     try:
         # --- Data Validation ---
-        if not data.city or data.city not in CITIES: # **VALIDATION FIX - ADDED CITY VALIDATION HERE**
-            logger.error(f"Invalid city detected: {data.city}. Skipping insert.") # **VALIDATION FIX**
-            return False # **VALIDATION FIX**
+        required_fields = ['url']  # This is good but not enforced
+        if not data.url:  # Check data.url now
+            logger.warning(f"Missing website URL, skipping insert")
+            return False
+
+        # FIX 1: Overly Strict Contact Requirements - Relax contact info requirement
+        if not (data.email or data.phoneNumber):
+            logger.warning(f"Skipping {data.url} - no contact info")
+            return False
         # --- End Data Validation ---
 
 
@@ -394,7 +499,7 @@ def save_to_supabase(supabase_client, data):
             # 'latLngPoint': None, # Skip latLngPoint for now
             # 'lastEmailSentAt': None, # Skip lastEmailSentAt for now
         }
-        logger.debug(f"Supabase Insert Payload: {data_for_supabase}") # DEBUG LOG - SUPABASE PAYLOAD - **CONFIRM CITY HERE**
+        logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
         response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute() # Correct table name
 
@@ -412,7 +517,7 @@ def save_to_supabase(supabase_client, data):
             logger.debug(f"Data Payload on success with no data: {data_for_supabase}") # Log payload on success with no data
             return False
 
-        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, url: {data.url}, city: {data.city}") # Improved success log - include id and URL and CITY - **CONFIRM CITY HERE**
+        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, url: {data.url}") # Improved success log - include id and URL
         return True
         # --- END UPDATED ERROR CHECKING ---
 
@@ -431,6 +536,7 @@ def save_to_csv(data_list, batch_number):
         "city",
         "url",
         "search_keywords",
+        "status" # MODIFIED: Include status in CSV export
         # Removed old fields like "company_name", "website_url", etc.
     ]
 
@@ -441,10 +547,11 @@ def save_to_csv(data_list, batch_number):
             writer.writerow({
                 "name": data_item.name,
                 "email": ", ".join(map(str, data_item.email)), # Ensure emails are strings before joining
-                "phone_number": ", ".join(data_item.phoneNumber),
+                "phone_number": ", ".join(map(str, data_item.phoneNumber), ),
                 "city": data_item.city,
                 "url": str(data_item.url) if data_item.url else "N/A", # Handle potential None for URL
                 "search_keywords": ", ".join(data_item.searchKeywords),
+                "status": data_item.status # MODIFIED: Include status in CSV export
             })
 
 
@@ -461,21 +568,21 @@ async def main():
     crawl_semaphore = asyncio.Semaphore(CRAWL_CONCURRENCY)
     llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
 
-    proxy_pool_to_use = None
+    proxy_pool_to_use = None # --- PROXY DISABLED ---
     if os.getenv("USE_PROXY", "False").lower() == "true":
         proxy_pool_to_use = utils.get_proxy_pool()
-        asyncio.create_task(utils.proxy_health_check(proxy_pool_to_use))
+        asyncio.create_task(utils.proxy_health_check(proxy_pool_to_use)) # Start proxy health check
 
-    error_budget["total"] = len(CITIES) * len(SEARCH_TERMS) * 5 # PAGES_PER_QUERY is not used, using 10 as default page count for error budget
+    error_budget["total"] = len(CITIES) * len(SEARCH_TERMS) * PAGES_PER_QUERY # Recalculate error budget
 
 
-    async def proxy_decay_scheduler():
+    def proxy_decay_scheduler(): # Removed async for thread compatibility
         while True:
-            utils.decay_proxy_scores()
-            await asyncio.sleep(3600)
+            utils.decay_proxy_scores() # Call proxy score decay - but it's commented out in utils.py now
+            time.sleep(3600) # Use time.sleep for thread-based scheduler
 
-    asyncio.create_task(proxy_decay_scheduler())
-    logger.info("Proxy score decay scheduler started.")
+    # threading.Thread(target=proxy_decay_scheduler, daemon=True).start() # Start proxy decay as thread # --- PROXY DISABLED ---
+    logger.info("Proxy score decay scheduler started.") # --- PROXY DISABLED ---
 
     async def connection_pool_monitor():
         while True:
@@ -489,27 +596,22 @@ async def main():
     BATCH_SIZES = [10, 25, 50, 100]
     current_batch_index = 0
 
-    r_client = redis.Redis(decode_responses=True) # Redis Connection Resilience - defined here
-    # Redis Connection Resilience - Add Redis connection verification
-    try:
-        if not r_client.ping():
-            raise redis.ConnectionError("Initial Redis connection failed")
-    except redis.RedisError as e:
-        logger.critical(f"Redis connection failed: {str(e)}")
-        # Implement reconnection logic here
-        exit(1)
+    r_client = redis.Redis(decode_responses=True)
 
-    # --- ADD THIS CODE TO CLEAR THE QUEUE AT THE START ---
+    # Clear the crawl_queue
     try:
-        queue_len = r_client.llen('crawl_queue')
-        if queue_len > 0:
-            r_client.delete('crawl_queue') # Clear the queue
-            logger.info(f"Cleared existing Redis crawl queue containing {queue_len} URLs.")
+        queue_length_before_clear = r_client.llen('crawl_queue')
+        if queue_length_before_clear > 0:
+            logger.info("Clearing existing crawl queue in Redis...")
+            r_client.delete('crawl_queue')
+            logger.info("Crawl queue cleared.")
         else:
-            logger.info("Redis crawl queue was empty, no need to clear.")
-    except redis.RedisError as e_clear_queue:
-        logger.error(f"Error clearing Redis queue at startup: {e_clear_queue}")
-    # --- END QUEUE CLEARING CODE ---
+            logger.info("Crawl queue is already empty or does not exist.")
+    except redis.exceptions.ConnectionError as e:
+        logger.error(f"Error connecting to Redis to clear queue: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error clearing Redis queue: {e}")
+
 
 
     url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
@@ -524,73 +626,40 @@ async def main():
                 search_query = f"{city} {term}"
                 logger.info(f"Preparing SerpAPI search for: Query={search_query}, City={city}, Term={term}") # INFO LOG - PREPARING SEARCH
                 async with SEARCH_SEM:
-                    # --- CRITICAL FIX - USE LAMBDA TO CAPTURE city and term ---
-                    search_tasks.append(lambda c=city, t=term: get_google_search_results(c, t, proxy_pool_to_use)) # Pass term separately and capture city/term
-                    # --- END CRITICAL FIX ---
+                    search_tasks.append(get_google_search_results(city, term, proxy_pool_to_use)) # Pass term separately
 
         logger.info("Awaiting SerpAPI search tasks...")
         logger.debug(f"DEBUG: Search tasks initiated: {len(search_tasks)}") # DEBUG LOG - SEARCH TASKS COUNT
-        search_results_list = await asyncio.gather(*[task() for task in search_tasks]) # Execute the lambda tasks
+        search_results_list = await asyncio.gather(*search_tasks)
         logger.info("SerpAPI search tasks completed.")
-        # --- ADD THESE DEBUG LOGS HERE ---
-        logger.debug(f"DEBUG: Full search_results_list BEFORE REDIS POPULATION: {search_results_list}") # Log the entire list
-        if search_results_list: # Check if list is not empty before iterating
-            for result_set in search_results_list: # Iterate through each result set
-                if result_set: # Check if result_set is not None
-                    logger.debug(f"DEBUG: Search Result Set - City: {result_set.get('city')}, Term: {result_set.get('term')}, URL Count: {len(result_set.get('urls', [])) if result_set.get('urls') else 0}") # Log city and term from each result set
-        # --- END ADDED DEBUG LOGS ---
+        logger.debug(f"DEBUG: Full search_results_list: {search_results_list}") # DEBUG LOG - FULL SEARCH RESULTS
 
-        for search_results in search_results_list: # Redis Queue Fixes
-            if not search_results or "urls" not in search_results: # Redis Queue Fixes
-                logger.debug(f"DEBUG: Skipping invalid search_results: {search_results}") # DEBUG LOG - EMPTY SEARCH RESULTS
-                continue # Redis Queue Fixes
+        for search_results in search_results_list:
+            logger.info(f"Processing search results for: {search_results['city']} {search_results['term']}")
+            if search_results:
+                logger.info(f"Found {len(search_results['urls'])} URLs in SerpAPI results.")
+                logger.debug(f"DEBUG: URLs from SerpAPI: {search_results['urls']}") # DEBUG LOG - URLS FROM SERPAPI
+                for url in search_results["urls"]:
+                    normalized_url = normalize_url(url)
+                    # --- CORRECTED CONTEXT CREATION ---
+                    context = {
+                        'city': search_results["city"],
+                        'term': search_results["term"]  # Use search_results['term'] here!
+                    }
+                    r_client.lpush('crawl_queue', json.dumps(context | {'url': utils.normalize_url(url)})) # MERGED: Use context dict and add URL
+                    logger.info(f"Added URL to queue: {normalized_url} for city: {search_results['city']}") # INFO LOG - URL ADDED TO QUEUE WITH CITY
+                    logger.debug(f"DEBUG: Full context added to queue: {json.dumps(context | {'url': utils.normalize_url(url)})}") # DEBUG LOG - FULL CONTEXT ADDED
 
-            logger.debug(f"DEBUG: Processing search_results for city: {search_results.get('city')}, term: {search_results.get('term')}") # DEBUG LOG - PROCESSING SEARCH RESULTS
-            logger.debug(f"DEBUG: Search Results for City: {search_results['city']}, Term: {search_results['term']}, URL Count: {len(search_results['urls'])}") # DEBUG LOG - SEARCH RESULTS SUMMARY - **CONFIRM CITY HERE**
-            for url in search_results["urls"]: # Redis Queue Fixes
-                context = {
-                    "city": search_results["city"],
-                    "term": search_results["term"],  # Critical fix # Redis Queue Fixes
-                    "url": utils.normalize_url(url)
-                }
-                # --- ADD THESE DEBUG LOGS RIGHT HERE ---
-                logger.debug(f"DEBUG: **BEFORE REDIS PUSH** - City: {context['city']}, Term: {context['term']}, URL: {context['url']}") # DEBUG LOG - REDIS PUSH - **CRITICAL LOG**
-                logger.debug(f"DEBUG: Pushing to Redis queue - City: {context['city']}, Term: {context['term']}, URL: {context['url']}") # DEBUG LOG - REDIS PUSH - **CONFIRM CITY HERE**
-                # --- END ADDED DEBUG LOGS ---
-                try: # Redis Queue Fixes
-                    # Verify Redis connection first # Redis Queue Fixes
-                    if not r_client.ping(): # Redis Queue Fixes
-                        raise redis.ConnectionError("Redis connection lost") # Redis Queue Fixes
-
-                    r_client.lpush('crawl_queue', json.dumps(context)) # Redis Queue Fixes
-                    r_client.expire('crawl_queue', 86400)  # 24h TTL # Redis Queue Fixes
-                except redis.RedisError as e: # Redis Queue Fixes
-                    logger.error(f"Redis error pushing {url}: {str(e)}") # Redis Queue Fixes
-                    # Implement retry logic here if needed # Redis Queue Fixes
-
-        # Force Redis persistence and refresh queue
-        try:
-            r_client.bgsave()
-        except redis.RedisError as e:
-            logger.error(f"Redis save operation failed: {e}")
-
-        try:
-            url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
-            logger.info(f"Queue now contains {len(url_contexts_queue)} URLs")  # Verification
-            logger.debug(f"DEBUG: Initial URL queue contents (first 10): {url_contexts_queue[:10]}") # DEBUG LOG - QUEUE CONTENTS
-        except redis.RedisError as e:
-            logger.error(f"Failed to read queue after save: {e}")
-            url_contexts_queue = [] # Ensure queue is empty in case of read failure
-
+        url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
+        logger.info(f"Initial URL queue populated with {len(url_contexts_queue)} URLs and saved to Redis.")
+        logger.debug(f"DEBUG: Initial URL queue contents (first 10): {url_contexts_queue[:10]}") # DEBUG LOG - QUEUE CONTENTS
     else:
         logger.info(f"Resuming from existing URL queue with {len(url_contexts_queue)} URLs.")
         logger.debug(f"DEBUG: Resuming URL queue contents (first 10): {url_contexts_queue[:10]}") # DEBUG LOG - RESUMING QUEUE CONTENTS
 
 
     batch_number = 0
-    rate_limiter = RateLimiter(requests_per_second=2) # Concurrency Throttling - Point 6 - Instantiate RateLimiter
-
-    heartbeat_counter = 0 # Monitoring Additions - Point 9 - Initialize heartbeat counter
+    rate_limiter = utils.RateLimiter(requests_per_second=2)
 
     while url_contexts_queue:
         current_batch_index = min(int(error_budget["success"]/50), 3)
@@ -602,13 +671,9 @@ async def main():
             break
 
         for _ in range(min(batch_size, len(url_contexts_queue))):
-            try:
-                url_context_str = r_client.lpop('crawl_queue')
-                if url_context_str:
-                    url_contexts_batch.append(json.loads(url_context_str))
-            except redis.RedisError as e:
-                logger.error(f"Failed to pop URL from queue: {e}")
-                continue # Skip to next iteration if pop fails
+            url_context_str = r_client.lpop('crawl_queue')
+            if url_context_str:
+                url_contexts_batch.append(json.loads(url_context_str))
 
         logger.debug(f"DEBUG: URL batch to process: {url_contexts_batch}") # DEBUG LOG - URL BATCH
 
@@ -623,7 +688,7 @@ async def main():
             llm_batches = [extracted_data_list[i:i + llm_batch_size] for i in range(0, len(extracted_data_list), llm_batch_size)]
 
             for llm_batch in llm_batches:
-                if llm_batch:
+                if llm_batch and False: # LLM Batch Processing - DISABLED - keep disabled for now
                     try:
                         session = await get_session()
                         async with LLM_SEM:
@@ -645,27 +710,20 @@ async def main():
         error_budget["failed"] += sum(1 for r in extracted_data_list if r is None)
         metrics['crawled_pages'].inc(len(extracted_data_list))
         metrics['extraction_failure'].inc(sum(1 for r in extracted_data_list if r is None))
-
-        heartbeat_counter += len(extracted_data_list) # Monitoring Additions - Point 9 - Increment heartbeat counter
-        if heartbeat_counter >= 50: # Monitoring Additions - Point 9 - HEARTBEAT_INTERVAL = 50
-            logger.info(f"HEARTBEAT: Processed ~{heartbeat_counter} URLs in total.") # Monitoring Additions - Point 9 - Heartbeat log
-            heartbeat_counter = 0 # Monitoring Additions - Point 9 - Reset counter
+        metrics['url_attempts'].labels(status='success').inc(sum(1 for r in extracted_data_list if r is not None)) # MODIFIED: Track success
 
 
         batch_number += 1
         current_batch_index += 1
-        try:
-            url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
-            logger.debug(f"DEBUG: Remaining URL queue length: {len(url_contexts_queue)}") # DEBUG LOG - REMAINING QUEUE LENGTH
-        except redis.RedisError as e:
-            logger.error(f"Failed to read queue length: {e}")
-            url_contexts_queue = [] # Ensure loop terminates if queue cannot be read
+        url_contexts_queue = r_client.lrange('crawl_queue', 0, -1)
+        logger.debug(f"DEBUG: Remaining URL queue length: {len(url_contexts_queue)}") # DEBUG LOG - REMAINING QUEUE LENGTH
 
+        await asyncio.sleep(random.uniform(1, 5))  # Random delay 1-5s # MODIFIED: Request Jitter - Random delay before next batch
 
     logger.info("Finished processing all URLs from queue.")
     logger.info(f"SerpAPI Usage Summary: Total Searches: {serpapi_usage['total_searches']}, Failed Searches: {serpapi_usage['failed_searches']}")
     logger.info(f"Search Counts per Proxy/No Proxy: {search_count}")
-    logger.info(f"Proxy Scores: {utils.PROXY_SCORES}")
+    logger.info(f"Proxy Scores: {utils.PROXY_SCORES}") # --- PROXY DISABLED ---
     logger.info(f"Error budget summary: {error_budget}")
     logger.info(f"Prometheus metrics available at http://localhost:8002/metrics")
     logger.info(f"Final 2Captcha balance: ${utils.CAPTCHA_BALANCE:.2f}")
@@ -709,4 +767,4 @@ if __name__ == "__main__":
         print("Session and Playwright closed in finally block.")
     print("After asyncio.run(main())...")
     # asyncio.run(test_rotation())
-    # asyncio.run(test_metrics())
+    # asyncio.run(test_metrics())?

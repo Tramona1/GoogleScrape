@@ -1,8 +1,7 @@
-# utils.py - FULL UPDATED CODE BASED ON SCHEMA propertyManagerContacts - WITH CITY FIX - FULL FILE REPLACEMENT
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
-import re
+import re # 1. Add Phone Normalization - IMPORT RE
 import time
 import datetime
 import logging
@@ -18,12 +17,11 @@ from pydantic import ( # Updated imports - field_validator and ValidationInfo ad
     field_validator, # <-- field_validator is imported
     Field,
     ValidationInfo, # <-- ValidationInfo is imported (optional, but good practice)
-    conlist,
-    # Optional # <-- Optional is still listed here within pydantic imports for clarity, but the import is now from 'typing' # REMOVE Optional from pydantic import
+    conlist
 )
-from typing import List, Optional # <-- Correct import for Optional - IMPORT FROM TYPING MODULE
+from typing import List, Optional
 import ollama
-from html import unescape
+import html # 2. Implement HTML Entity Decoding - IMPORT HTML
 import random
 import socket
 from fake_useragent import UserAgent
@@ -44,36 +42,129 @@ from async_lru import alru_cache
 import redis
 from time import sleep
 from playwright.async_api import async_playwright
+import phonenumbers
 
-MAX_CAPTCHA_ATTEMPTS = 2 # Reduced CAPTCHA Retries - Point 9
-MAX_PROXY_FAILURES = 2 # Proxy Failure Handling - Point 3
+# REMOVE THIS LINE FROM UTILS.PY:
+# from crawler import decode_html_entities, normalize_phone # FIX 6: Phone Number Parsing - Import phonenumbers
+
+MAX_CAPTCHA_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
 
-GENERIC_DOMAINS = GENERIC_DOMAINS = { # Domain Filter Adjustment - Point 5 - Refined Generic Domains
-    "orbitz.com", "blogspot.com", "google.com", "facebook.com",
-    "youtube.com", "twitter.com", "linkedin.com", "instagram.com", "pinterest.com",
-    "yelp.com", "tripadvisor.com", "reddit.com", "wikipedia.org", "mediawiki.org",
-    "amazon.com", "ebay.com", "craigslist.org", "indeed.com", "glassdoor.com",
-    "zillow.com", "realtor.com", "apartments.com",
-    "booking.com", "allpropertymanagement.com", "airdna.co", "airdna.com",
-    "vacasa.com", "cozycozy.com", "kayak.com", "expedia.com", "news-outlet.com",
-    "social_media.com", "evolve.com",
-    "homes-and-villas.marriott.com", "hometogo.com", "www.hometogo.com",
-    "whimstay.com", "www.whimstay.com", "avantstay.com", "houfy.com", "www.redawning.com",
-    "corporatehousing.com", "www.corporatehousing.com", "https://www.onefinestay.com", "https://www.wimdu.com"
-    "https://www.theblueground.com", "https://awning.com", "https://www.airconcierge.net", "fiscalnote.com",
-    "news.com", "www.investopedia.com", "www.bankrate.com", "www.newyorkfed.org", "www.bloomberg.com",
-    "https://hotpads.com", "www.zumper.com", "www.homes.com", "www.redfin.com", "www.apartmentfinder.com",
-    "www.forrent.com", "http://www.airbtics.com", "www.furnishedfinder.com", "http://www.corporatehousingbyowner.com",
-    "www.zumperrentals.com", "www.corporatehousingbyowner.com", "https://www.wimdu.com", "www.quora.com", "www.airconcierge.net",
-    "www.staysophari.com", "www.windermere.com", "www.zipcar.com", "awning.com", "www.tesla.com","www.geekwire.com",
+GENERIC_DOMAINS = {
+    "orbitz.com",
+    "blogspot.com",
+    "google.com",
+    "facebook.com",
+    "youtube.com",
+    "twitter.com",
+    "linkedin.com",
+    "instagram.com",
+    "pinterest.com",
+    "yelp.com",
+    "tripadvisor.com",
+    "reddit.com",
+    "amazon.com",
+    "ebay.com",
+    "indeed.com",
+    "glassdoor.com",
+    "zillow.com",
+    "realtor.com",
+    "apartments.com",
+    "booking.com",
+    "allpropertymanagement.com",
+    "airdna.co",
+    "airdna.com",
+    "vacasa.com",
+    "cozycozy.com",
+    "kayak.com",
+    "expedia.com",
+    "news-outlet.com",
+    "social_media.com",
+    "evolve.com",
+    "airbnb.com",
+    "vrbo.com",
+    "homes-and-villas.marriott.com",
+    "hometogo.com",
+    "hometogo.com",
+    "whimstay.com",
+    "whimstay.com",
+    "avantstay.com",
+    "houfy.com",
+    "redawning.com",
+    "corporatehousing.com",
+    "corporatehousing.com",
+    "onefinestay.com",
+    "theblueground.com",
+    "awning.com",
+    "airconcierge.net",
+    "fiscalnote.com",
+    "news.com",
+    "investopedia.com",
+    "bankrate.com",
+    "bloomberg.com",
+    "hotpads.com",
+    "zumper.com",
+    "homes.com",
+    "redfin.com",
+    "apartmentfinder.com",
+    "forrent.com",
+    "airbtics.com",
+    "furnishedfinder.com",
+    "corporatehousingbyowner.com",
+    "zumperrentals.com",
+    "corporatehousingbyowner.com",
+    "wimdu.com",
+    "quora.com",
+    "airconcierge.net",
+    "staysophari.com",
+    "windermere.com",
+    "zipcar.com",
+    "awning.com",
+    "tesla.com",
+    "geekwire.com",
+    "skyrun.com",
+    "plumguide.com",
+    "wander.com",
+    "itrip.net",
+    "theblueground.com",
+    "wimdu.com",
+    "tiktok.com",
+    "yahoo.com",
+    "foxla.com",
+    "latimes.com",
+    "biggerpockets.com", # Added biggerpockets.com
+    "marriott.com", # Added marriott.com
+    "casamundo.com", # Added casamundo.com
+    "hichee.com", # Added hichee.com
+    "newswire.com",
+    "avalara.com",
+    "attorneysecrets.com",
+    "hellolanding.com",
+    "psychologytoday.com"
 }
 
+filtered_domains = set()
+for domain in GENERIC_DOMAINS:
+    if not domain.endswith(".org"):
+        filtered_domains.add(domain)
 
-BAD_PATH_PATTERN = re.compile(r'/(category|tag/page)/', re.IGNORECASE)
+GENERIC_DOMAINS = filtered_domains
+
+BAD_PATH_SEGMENTS = ["/news", "/video", "/business"] # List of path segments to block
+
+filtered_domains = set()
+for domain in GENERIC_DOMAINS:
+    if not domain.endswith(".org"):
+        filtered_domains.add(domain)
+
+GENERIC_DOMAINS = filtered_domains
+
+BAD_PATH_PATTERN = re.compile(r'/(category|tag|author)/', re.IGNORECASE) # Removed 'page' from bad path pattern
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0', # Added more user agents
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
@@ -113,6 +204,25 @@ HEADERS_LIST = [ # Enhanced Headers List
     },
 ]
 
+def get_headers(url):
+    """Get randomized headers for requests"""
+    return {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept-Language': f'en-US,en;q=0.{random.randint(5,9)}',
+        'Referer': random.choice([
+            'https://www.google.com/',
+            'https://www.bing.com/',
+            'https://duckduckgo.com/',
+            'https://search.yahoo.com/',
+            'https://www.startpage.com/'
+        ]),
+        'Sec-Fetch-Dest': 'document' if random.random() > 0.3 else 'empty',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin' if random.random() > 0.5 else 'cross-site',
+        'X-Requested-With': random.choice(['XMLHttpRequest', 'None']),
+        'Alt-Used': urlparse(url).netloc,
+        'Sec-CH-UA': f'"Chromium";v="{random.randint(100, 115)}", "Not:A-Brand";v="{random.randint(10, 99)}"'
+    }
 
 RELEVANCE_KEYWORDS = [ # More comprehensive keywords for relevance
     "vacation rental", "vacation rentals", "short term rental", "short term rentals",
@@ -141,30 +251,37 @@ RELEVANCE_KEYWORDS = [ # More comprehensive keywords for relevance
 ]
 
 
-CLIENT_TIMEOUT = 25 # Timeout Optimization - Point 2 - Reduced from 40
+CLIENT_TIMEOUT = 40
 
-PROXY_HEALTH = {}
+PROXY_HEALTH = {} # --- PROXY DISABLED ---
 CAPTCHA_BALANCE = float(os.getenv("INITIAL_CAPTCHA_BALANCE", "10.0"))
 CAPTCHA_COST = {
     'recaptcha_v2': 0.0025,
     'recaptcha_v3': 0.005,
-    'hcaptcha': 0.0025 # ADDED hCaptcha cost - same as reCAPTCHA v2 for now
+     'hcaptcha': 0.0025 # ADDED hCaptcha cost - same as reCAPTCHA v2 for now
 }
-BRIGHTDATA_PORTS = [22225, 22226, 33335] # Updated BRIGHTDATA_PORTS - FALLBACK PORT ADDED
-BRIGHTDATA_GEO = ["us-east", "us-west"]
-BRIGHTDATA_USER = os.getenv("BRIGHTDATA_USER")
-BRIGHTDATA_PASS = os.getenv("BRIGHTDATA_PASS") # ADDED BRIGHTDATA_PASS for proxy auth
+BRIGHTDATA_PORTS = [22225, 22226, 33335] # --- PROXY DISABLED ---
+BRIGHTDATA_GEO = ["us-east", "us-west"] # --- PROXY DISABLED ---
+BRIGHTDATA_PORTS_CYCLE = cycle(BRIGHTDATA_PORTS) # --- PROXY DISABLED ---
+BRIGHTDATA_GEO_CYCLE = cycle(BRIGHTDATA_GEO) # --- PROXY DISABLED ---
+PROXY_PROVIDERS = cycle(['oxylabs', 'smartproxy', 'brightdata']) # Proxy provider rotation - ADDED # --- PROXY DISABLED ---
+PROXY_ROTATION_TYPE = os.getenv("PROXY_ROTATION_TYPE", "provider_weighted") # Rotation type - ADDED # --- PROXY DISABLED ---
+PROXY_WEIGHTS = {'oxylabs': 0.4, 'smartproxy': 0.3, 'brightdata': 0.3} # Weights for provider rotation - ADDED # --- PROXY DISABLED ---
+
+BRIGHTDATA_USER = os.getenv("BRIGHTDATA_USER") # --- PROXY DISABLED ---
+BRIGHTDATA_PASS = os.getenv("BRIGHTDATA_PASS") # ADDED BRIGHTDATA_PASS for proxy auth # --- PROXY DISABLED ---
 IMPERSONATIONS = ["chrome120", "chrome119"]
 captcha_lock = threading.Lock()
 
-PROXY_SCORE_CONFIG = { # Updated PROXY_SCORE_CONFIG - LESS AGGRESSIVE SCORING
-    'success': +30,    # Increased from +25
-    'failure': -20,    # Reduced from -40
-    'timeout': -15,    # Reduced from -30
-    'min_score': 20,   # Increased from 15
+PROXY_SCORE_CONFIG = { # Updated PROXY_SCORE_CONFIG - LESS AGGRESSIVE SCORING # --- PROXY DISABLED ---
+    'success': +20,    # Reduced reward
+    'failure': -5,     # Reduced penalty
+    'timeout': -5,     # Reduced timeout penalty
+    'min_score': 10,   # Lower minimum score
+    'disable_threshold': 15, # Disable proxies if average score <15
+    'reactivation_delay': 3600, # 1 hour cooldown
     'initial': 70      # Increased from 50
-}
-
+} # Adjusted proxy score config to be less aggressive # --- PROXY DISABLED ---
 
 def configure_metrics():
     metric_prefixes_to_cleanup = ['extraction_', 'serpapi_', 'captcha_', 'crawled_', 'avg_relevance_', 'http_status_', 'page_extraction_', 'proxy_', 'request_', 'extraction_success_', 'crawl_']
@@ -182,25 +299,29 @@ def configure_metrics():
         'captcha_requests': Counter('captcha_requests', 'Number of CAPTCHA requests'),
         'captcha_solved': Counter('captcha_solved', 'Number of CAPTCHAs successfully solved'),
         'captcha_failed': Counter('captcha_failed', 'Number of CAPTCHA solving failures'),
+        'rate_limit_errors': Counter('rate_limit_errors', 'Rate Limit Errors'), # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
         'page_extraction_errors': Counter('page_extraction_errors', 'Page Extraction Errors'),
         'proxy_errors': Counter('proxy_errors', 'Proxy Errors'),
-        'request_errors': Counter('request_errors', 'Request Errors'),
+        'request_errors': Counter('request_errors', 'Request Errors', ['type']), # MODIFIED: Request errors with type
+        'url_attempts': Counter('url_attempts', 'URL Attempts', ['status']), # MODIFIED: URL attempts metric
         'extraction_success': Counter('extraction_success', 'Successful data extractions'),
         'crawl_errors': Counter('crawl_errors', 'Crawl errors', ['type', 'proxy']),
-        'failed_urls': Counter('failed_urls', 'Number of URLs that failed to crawl completely') # Monitoring Additions - Point 9
+        'proxy_health_state': Gauge('proxy_health_state', 'Proxy Health State (1=active, 0=disabled)'), # Proxy health state metric # --- PROXY DISABLED ---
+        'proxy_fallback_requests': Counter('proxy_fallback_requests', 'Requests served without proxies'), # Proxy fallback requests metric # --- PROXY DISABLED ---
+        'proxy_effectiveness': Summary('proxy_effectiveness', 'Success rate of proxy vs direct requests') # Proxy effectiveness summary # --- PROXY DISABLED ---
     }
 
 
 metrics = configure_metrics()
 crawl_latency_summary = Summary('crawl_latency_seconds', 'Latency of page crawls')
 
-PROXY_SCORES = defaultdict(lambda: PROXY_SCORE_CONFIG['initial']) # Updated PROXY_SCORES - INITIAL SCORE NOW FROM CONFIG
-PROXY_ROTATION_LOCK = threading.Lock()
+PROXY_SCORES = defaultdict(lambda: PROXY_SCORE_CONFIG['initial']) # Updated PROXY_SCORES - INITIAL SCORE NOW FROM CONFIG # --- PROXY DISABLED ---
+PROXY_ROTATION_LOCK = threading.Lock() # --- PROXY DISABLED ---
 _session = None
-proxy_cycle = None
-PROXY_FAILURES = defaultdict(int) # Proxy Failure Handling - Point 3 - Track proxy failures
+proxy_cycle = None # --- PROXY DISABLED ---
+PROXY_DISABLED_UNTIL = 0 # Track when proxies are disabled until # --- PROXY DISABLED ---
 
-SSL_WHITELIST = ["brd.superproxy.io", "gate.smartproxy.com"] # ADDED SSL_WHITELIST
+SSL_WHITELIST = ["brd.superproxy.io", "gate.smartproxy.com"] # ADDED SSL_WHITELIST # --- PROXY DISABLED ---
 
 # --- Playwright Shared Instance ---
 _playwright_instance = None
@@ -213,27 +334,27 @@ async def get_playwright_instance():
         await _playwright_instance.__aenter__()
     return _playwright_instance
 
-async def get_browser_instance(proxy=None):
+async def get_browser_instance(proxy=None): # --- PROXY DISABLED --- #async def get_browser_instance(proxy=None):
     async with async_playwright() as p:
         proxy_args = {}
-        if proxy: # Configure proxy if provided
-            proxy_parts = proxy.split('@')
-            if len(proxy_parts) == 2:
-                auth_user_pass, proxy_host_port = proxy_parts
-                auth = auth_user_pass.split(':')
-                if len(auth) == 2:
-                    proxy_user, proxy_pass = auth
-                    proxy_args = {
-                        "proxy": {
-                            "server": f"http://{proxy_host_port}",
-                            "username": proxy_user,
-                            "password": proxy_pass
-                        }
-                    }
-                else:
-                     proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth
-            else:
-                proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth
+        # if proxy: # Configure proxy if provided # --- PROXY DISABLED ---
+        #     proxy_parts = proxy.split('@') # --- PROXY DISABLED ---
+        #     if len(proxy_parts) == 2: # --- PROXY DISABLED ---
+        #         auth_user_pass, proxy_host_port = proxy_parts # --- PROXY DISABLED ---
+        #         auth = auth_user_pass.split(':') # --- PROXY DISABLED ---
+        #         if len(auth) == 2: # --- PROXY DISABLED ---
+        #             proxy_user, proxy_pass = auth # --- PROXY DISABLED ---
+        #             proxy_args = { # --- PROXY DISABLED ---
+        #                 "proxy": { # --- PROXY DISABLED ---
+        #                     "server": f"http://{proxy_host_port}", # --- PROXY DISABLED ---
+        #                     "username": proxy_user, # --- PROXY DISABLED ---
+        #                     "password": proxy_pass # --- PROXY DISABLED ---
+        #                 } # --- PROXY DISABLED ---
+        #             } # --- PROXY DISABLED ---
+        #         else: # --- PROXY DISABLED ---
+        #              proxy_args = {"proxy": {"server": f"http://{proxy_host_port}"}} # No auth # --- PROXY DISABLED ---
+        #     else: # --- PROXY DISABLED ---
+        #         proxy_args = {"proxy": {"server": f"http://{proxy}"}} # No auth # --- PROXY DISABLED ---
 
         browser = await p.chromium.launch(**proxy_args)
         return browser
@@ -261,11 +382,18 @@ async def close_playwright():
 
 async def get_session():
     global _session
+    resolver = AsyncResolver(nameservers=[ # MODIFIED: DNS Cache Rotation - Resolver inside get_session
+        '8.8.8.8',
+        '1.1.1.1',
+        '9.9.9.9',
+        '208.67.222.222', # OpenDNS
+        '208.67.220.220'  # OpenDNS
+    ])
     if not _session or _session.closed:
         ssl_context = False # Default SSL context - can be adjusted if needed globally
         _session = ClientSession(
-            connector=TCPConnector(limit=75, resolver=AsyncResolver(), ssl=ssl_context), # Default SSL Context for Session
-            timeout=aiohttp.ClientTimeout(total=30)
+            connector=TCPConnector(limit=75, resolver=resolver, ssl=ssl_context), # MODIFIED: Use resolver in connector
+            timeout=aiohttp.ClientTimeout(total=45) # MODIFIED: Increased timeout to 45s
         )
         logger.debug("DEBUG: Created a new aiohttp ClientSession.") # ADDED DEBUG LOG
     return _session
@@ -278,23 +406,73 @@ async def close_session():
         logger.debug("DEBUG: Closed the aiohttp ClientSession.") # ADDED DEBUG LOG
     _session = None
 
+def should_use_proxies(proxy_pool_to_use): # Added should_use_proxies function
+    return False # --- PROXY DISABLED ---
+    global PROXY_DISABLED_UNTIL
+    if not proxy_pool_to_use:
+        metrics['proxy_health_state'].set(0) # Set proxy health to disabled
+        return False
+
+    if time.time() < PROXY_DISABLED_UNTIL: # Check if still in cooldown
+        metrics['proxy_health_state'].set(0) # Set proxy health to disabled
+        return False
+
+    avg_score = sum(PROXY_SCORES[p] for p in proxy_pool_to_use) / len(proxy_pool_to_use) if proxy_pool_to_use else 100 # Default to 100 if no proxies
+
+    if avg_score < PROXY_SCORE_CONFIG['disable_threshold']:
+        PROXY_DISABLED_UNTIL = time.time() + PROXY_SCORE_CONFIG['reactivation_delay'] # Set cooldown
+        logger.warning(f"Proxy health below threshold ({avg_score:.2f} < {PROXY_SCORE_CONFIG['disable_threshold']}) - disabling proxies for {PROXY_SCORE_CONFIG['reactivation_delay']//3600} hour.")
+        metrics['proxy_health_state'].set(0) # Set proxy health to disabled
+        return False
+
+    metrics['proxy_health_state'].set(1) # Set proxy health to active
+    return True
+
+
+async def headless_fallback(url): # MODIFIED: Headless Browser Fallback - Implementation
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True) # Launch in headless mode
+            context = await browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                locale='en-US'
+            )
+            page = await context.new_page()
+
+            # Simulate human-like navigation
+            await page.mouse.move(random.randint(0, 300), random.randint(0, 300), steps=5) # Move mouse slightly
+            await asyncio.sleep(random.uniform(0.5, 1.5)) # Small pause
+
+            await page.goto(url, timeout=60000) # Increased timeout for headless
+            content = await page.content() # Get content after page load
+            await browser.close()
+            logger.info(f"Headless browser fetched content for {url}") # Log success
+            return content # Return content if successful
+    except Exception as e: # Catch exceptions in headless browsing
+        logger.error(f"Headless fallback failed for {url}: {str(e)[:200]}") # Log error
+        metrics['request_errors'].labels(type='headless_fallback_failed').inc() # MODIFIED: Metric for headless failure
+        return None # Return None on failure
 
 def rotate_proxy(proxy_pool):
-    if not proxy_pool:
-        return None
+    return None # --- PROXY DISABLED ---
+    if not proxy_pool or not should_use_proxies(proxy_pool): # Check should_use_proxies here
+        return None  # Full proxy bypass
 
-    # Get proxies with scores above minimum threshold
+    # Select from proxies with scores above minimum
     healthy_proxies = [p for p in proxy_pool if PROXY_SCORES.get(p, 0) > PROXY_SCORE_CONFIG['min_score']]
 
     if healthy_proxies:
-        # Select proxy with highest score
-        return max(healthy_proxies, key=lambda x: PROXY_SCORES[x])
+        # Prioritize proxies with highest score
+        best_proxy = max(healthy_proxies, key=lambda x: PROXY_SCORES[x])
+        logger.debug(f"Rotating to best healthy proxy: {best_proxy} (score: {PROXY_SCORES[best_proxy]})")
+        return best_proxy
     else:
-        # Fallback to random selection from full pool
-        return random.choice(proxy_pool)
+        logger.warning("No healthy proxies available, using random fallback.")
+        return random.choice(proxy_pool) # Fallback to random if no healthy proxies
 
 
-def decay_proxy_scores():
+def decay_proxy_scores(): # Commenting out proxy score decay
+    pass # --- PROXY DISABLED ---
     decay_factor = 0.95
     min_score = PROXY_SCORE_CONFIG['min_score'] # Use min_score from config
     for proxy in list(PROXY_SCORES.keys()):
@@ -305,6 +483,7 @@ def decay_proxy_scores():
             logger.info(f"Proxy {proxy} score reached 0 or below. Consider removing or further validation.")
         if PROXY_SCORES[proxy] < min_score and PROXY_SCORES[proxy] > 0:
             PROXY_SCORES[proxy] = min_score
+
 
 
 def normalize_url(url):
@@ -322,329 +501,400 @@ def normalize_url(url):
     ))
 
 
-async def crawl_and_extract_async(session, context, proxy_pool=None): # Timeout Optimization - Point 2 - Wrapped with timeout
-    try:
-        async with async_timeout.timeout(CLIENT_TIMEOUT): # Timeout Optimization - Point 2 - Reduced timeout
-            url = context['url']
-            city = context['city'] # City from context - this is what we want to use
-            term = context['term']
-            logger.debug(f"Entering crawl_and_extract_async for URL: {url}, City: {city}, Term: {term}") # DEBUG LOG - ENTRY POINT - **CONFIRM CITY HERE**
-            extracted_data = PropertyManagerData(
-                 city=city, # Assign city from context - DIRECT ASSIGNMENT HERE - **CONFIRM CITY HERE**
-                 url=url,
-                 searchKeywords=[term],
-                 link=url, # Set link to be the same as url for now
-                 thoughts=f"Search term: {term}" # Example: Set thoughts to search term info
-            )
-            start_time = time.time()
+async def crawl_and_extract_async(session, context, proxy_pool=None, current_proxy=None, depth=0): # FIX 4: Missing Internal Link Following - Add depth parameter
+    url = context['url']
+    city = context['city'] # City from context - this is what we want to use
+    term = context['term']
+    logger.debug(f"Entering crawl_and_extract_async for URL: {url}, City: {city}, Term: {term}, Proxy: Direct") # DEBUG LOG - ENTRY POINT # --- PROXY DISABLED --- #Proxy: {current_proxy if current_proxy else 'Direct'}
+    # Initialize with minimal data # MODIFIED: Persist URLs on Failure - Initialize with status='attempted'
+    extracted_data = PropertyManagerData(
+         city=city, # Assign city from context - DIRECT ASSIGNMENT HERE
+         url=url,
+         searchKeywords=[term],
+         link=url, # Set link to be the same as url for now
+         status='attempted' # MODIFIED: Persist URLs on Failure - Initial status
+    )
+    if not validate_request(url): # Validate URL at start
+        metrics['crawl_errors'].labels(type='invalid_url', proxy='no_proxy').inc() # Label as no_proxy
+        return extracted_data # MODIFIED: Persist URLs on Failure - Return even on invalid URL
 
-            current_proxy = None
-            proxy_key = 'no_proxy'
-            proxy_retries = 0
-            use_proxy = os.getenv("USE_PROXY", "False").lower() == "true"
+    start_time = time.time()
 
-            if use_proxy and proxy_pool:
-                current_proxy = rotate_proxy(proxy_pool)
-                proxy_key = current_proxy
-                if not current_proxy:
-                    logger.warning("No proxy available initially, will try without proxy if proxy attempts fail.")
+    proxy_key = 'no_proxy' # --- PROXY DISABLED --- #current_proxy if current_proxy else 'no_proxy' # Determine proxy_key based on current_proxy
+    proxy_retries = 0
+    use_proxy = False # --- PROXY DISABLED --- #os.getenv("USE_PROXY", "False").lower() == "true"
+    use_proxy_for_request = False # --- PROXY DISABLED --- #should_use_proxies(proxy_pool) # Determine if proxies should be used for this request
 
-            parsed_url = urlparse(url)
-            try_again_with_new_proxy = True
-            e_aiohttp = None
-            hcaptcha_element = None
+    if use_proxy and use_proxy_for_request and proxy_pool and not current_proxy:
+        current_proxy = rotate_proxy(proxy_pool)
+        proxy_key = current_proxy if current_proxy else 'no_proxy' # Update proxy_key after rotation
+        if not current_proxy:
+            logger.warning("No proxy available initially, will try without proxy if proxy attempts fail.")
 
-            while try_again_with_new_proxy and use_proxy and current_proxy:
-                try_again_with_new_proxy = False
-                hcaptcha_element = None
-                try:
-                    headers = {'User-Agent': random.choice(USER_AGENTS)}
-                    headers.update(random.choice(HEADERS_LIST))
-                    headers['Referer'] = urlparse(url).netloc
+    parsed_url = urlparse(url)
+    try_again_with_new_proxy = False # --- PROXY DISABLED --- #True
+    e_aiohttp = None
+    hcaptcha_element = None
+    attempted_proxy = None # --- PROXY DISABLED --- #current_proxy # Track which proxy was attempted
 
-                    ssl_context = False if any(d in current_proxy for d in SSL_WHITELIST) else None
+    # while try_again_with_new_proxy and use_proxy and use_proxy_for_request and proxy_pool and attempted_proxy: # Check attempted_proxy instead of current_proxy # --- PROXY DISABLED ---
+    #     try_again_with_new_proxy = False # --- PROXY DISABLED ---
+    #     hcaptcha_element = None # --- PROXY DISABLED ---
+    #     try: # --- PROXY DISABLED ---
+    #         headers = {'User-Agent': random.choice(USER_AGENTS)} # --- PROXY DISABLED ---
+    #         headers.update(random.choice(HEADERS_LIST)) # --- PROXY DISABLED ---
+    #         headers['Referer'] = urlparse(url).netloc # --- PROXY DISABLED ---
 
-                    if os.getenv("IMPERSONATE_CHROME", "false").lower() == "true":
-                        impersonate_str = random.choice(IMPERSONATIONS)
-                        logger.debug(f"Impersonating: {impersonate_str}")
-                        resp = await session.get(url, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, impersonate=impersonate_str, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
-                    else:
-                        resp = await session.get(url, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
+    #         ssl_context = False if any(d in attempted_proxy for d in SSL_WHITELIST) else None # Use attempted_proxy for SSL whitelist check # --- PROXY DISABLED ---
 
-                    metrics['http_status_codes'].labels(code=resp.status).inc()
+    #         if os.getenv("IMPERSONATE_CHROME", "false").lower() == "true": # --- PROXY DISABLED ---
+    #             impersonate_str = random.choice(IMPERSONATIONS) # --- PROXY DISABLED ---
+    #             logger.debug(f"Impersonating: {impersonate_str}") # --- PROXY DISABLED ---
+    #             resp = await session.get(url, headers=headers, proxy=f"http://{attempted_proxy}" if attempted_proxy else None, impersonate=impersonate_str, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Use attempted_proxy # --- PROXY DISABLED ---
+    #         else: # --- PROXY DISABLED ---
+    #             resp = await session.get(url, headers=headers, proxy=f"http://{attempted_proxy}" if attempted_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Use attempted_proxy # --- PROXY DISABLED ---
 
-                    if resp.status in [403, 404, 429, 500, 503]:
-                        logger.warning(f"HTTP error {resp.status} for {url} using proxy: {current_proxy if current_proxy else 'None'}")
-                        metrics['crawl_errors'].labels(type=f'http_{resp.status}', proxy=proxy_key).inc()
-                        update_proxy_score(proxy_key, False)
+    #         metrics['http_status_codes'].labels(code=resp.status).inc() # --- PROXY DISABLED ---
 
-                        if resp.status == 403 and proxy_pool and proxy_retries < 2:
-                            proxy_retries += 1
-                            current_proxy = rotate_proxy(proxy_pool)
-                            proxy_key = current_proxy
-                            logger.info(f"Retrying {url} with a different proxy due to 403, attempt {proxy_retries + 1}...")
-                            try_again_with_new_proxy = True
-                            continue
-                        else:
-                            return None
+    #         if resp.status in [403, 404, 429, 500, 503]: # --- PROXY DISABLED ---
+    #             logger.warning(f"HTTP error {resp.status} for {url} using proxy: {attempted_proxy if attempted_proxy else 'None'}") # Use attempted_proxy # --- PROXY DISABLED ---
+    #             metrics['crawl_errors'].labels(type=f'http_{resp.status}', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #             update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
 
-                    if resp.status == 405:
-                        logger.warning(f"HTTP 405 error for {url}, trying with allow_redirects=False")
-                        metrics['crawl_errors'].labels(type='http_405', proxy=proxy_key).inc()
-                        resp = await session.get(url, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, allow_redirects=False, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
-                        if resp.status != 200:
-                            logger.warning(f"HTTP 405 retry failed, status {resp.status}")
-                            update_proxy_score(proxy_key, False)
-                            return None
+    #             if resp.status == 403 and proxy_pool and proxy_retries < 2: # --- PROXY DISABLED ---
+    #                 proxy_retries += 1 # --- PROXY DISABLED ---
+    #                 current_proxy = rotate_proxy(proxy_pool) # --- PROXY DISABLED ---
+    #                 attempted_proxy = current_proxy # Update attempted_proxy for retry # --- PROXY DISABLED ---
+    #                 proxy_key = attempted_proxy if attempted_proxy else 'no_proxy' # Update proxy_key # --- PROXY DISABLED ---
+    #                 logger.info(f"Retrying {url} with a different proxy due to 403, attempt {proxy_retries + 1}, proxy: {attempted_proxy if attempted_proxy else 'Direct'}") # --- PROXY DISABLED ---
+    #                 try_again_with_new_proxy = True # --- PROXY DISABLED ---
+    #                 continue # --- PROXY DISABLED ---
+    #             else: # --- PROXY DISABLED ---
+    #                 metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                 return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
 
-                    if resp.status == 503 and "amazonaws.com/captcha" in str(resp.url):
-                        logger.warning(f"AWS CAPTCHA detected at {resp.url} for {url}")
-                        metrics['captcha_requests'].inc()
-                        metrics['captcha_failed'].inc()
-                        update_proxy_score(proxy_key, False)
-                        return None
+    #         if resp.status == 405: # --- PROXY DISABLED ---
+    #             logger.warning(f"HTTP 405 error for {url}, trying with allow_redirects=False") # --- PROXY DISABLED ---
+    #             metrics['crawl_errors'].labels(type='http_405', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #             resp = await session.get(url, headers=headers, proxy=f"http://{attempted_proxy}" if attempted_proxy else None, allow_redirects=False, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Use attempted_proxy # --- PROXY DISABLED ---
+    #             if resp_after_captcha.status != 200: # --- PROXY DISABLED ---
+    #                 logger.warning(f"HTTP 405 retry failed, status {resp.status}") # --- PROXY DISABLED ---
+    #                 update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #                 metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                 return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
 
-                    html_content = await resp.text()
-                    print("----- HTML Content (First 500 chars) - aiohttp -----")
-                    print(html_content[:500])
-                    print("----- Text Content (First 500 chars) - aiohttp -----")
-                    soup = BeautifulSoup(html_content, 'lxml')
-                    text_content = soup.get_text(separator=' ', strip=True).lower()
-                    print(text_content[:500])
+    #         if resp.status == 503 and "amazonaws.com/captcha" in str(resp.url): # --- PROXY DISABLED ---
+    #             logger.warning(f"AWS CAPTCHA detected at {resp.url} for {url}") # --- PROXY DISABLED ---
+    #             metrics['captcha_requests'].inc() # --- PROXY DISABLED ---
+    #             metrics['captcha_failed'].inc() # --- PROXY DISABLED ---
+    #             update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #             metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #             return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
 
-                    hcaptcha_element = soup.find('h-captcha')
-                    if hcaptcha_element:
-                        logger.warning(f"hCaptcha element initially detected by BeautifulSoup, but might be JS rendered. Proceeding with Playwright check for {url}.")
-                    else:
-                        logger.debug(f"hCaptcha not found in initial HTML, proceeding with BeautifulSoup parsing for {url}")
-                        captcha_sitekey_v2 = re.search(r'data-sitekey="([^"]+)"', html_content)
-                        captcha_sitekey_v3 = re.search(r'sitekey: ?"([^"]+)"', html_content)
-                        captcha_sitekey_invisible = re.search(r'recaptcha\.render\("([^"]+)", {', html_content)
+    #         html_content = await resp.text() # --- PROXY DISABLED ---
+    #         print("----- HTML Content (First 500 chars) - aiohttp with proxy -----") # --- PROXY DISABLED ---
+    #         print(html_content[:500]) # --- PROXY DISABLED ---
+    #         print("----- Text Content (First 500 chars) - aiohttp with proxy -----") # --- PROXY DISABLED ---
+    #         soup = BeautifulSoup(html_content, 'lxml') # --- PROXY DISABLED ---
+    #         text_content = soup.get_text(separator=' ', strip=True).lower() # --- PROXY DISABLED ---
+    #         print(text_content[:500]) # --- PROXY DISABLED ---
 
-                        if captcha_sitekey_v2 and not hcaptcha_element:
-                            captcha_sitekey = captcha_sitekey_v2.group(1)
-                            logger.warning(f"ReCAPTCHA v2 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
-                            captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
-                            if captcha_response:
-                                metrics['captcha_solved'].inc()
-                                logger.info(f"reCAPTCHA v2 solved, proceeding with request...")
-                                captcha_params = {'g-recaptcha-response': captcha_response}
-                                resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
-                                if resp_after_captcha.status == 200:
-                                    html_content = await resp_after_captcha.text()
-                                    soup = BeautifulSoup(html_content, 'lxml')
-                                    text_content = soup.get_text(separator=' ', strip=True).lower()
-                                else:
-                                    logger.error(f"reCAPTCHA v2 solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                                    metrics['crawl_errors'].labels(type='captcha_failed_http', proxy=proxy_key).inc()
-                                    update_proxy_score(proxy_key, False)
-                                    return None
-                            else:
-                                logger.error(f"ReCAPTCHA v2 solving failed for {url}")
-                                metrics['crawl_errors'].labels(type='captcha_unsolved_v2', proxy=proxy_key).inc()
-                                update_proxy_score(proxy_key, False)
-                                return None
+    #         hcaptcha_element = soup.find('h-captcha') # --- PROXY DISABLED ---
+    #         if hcaptcha_element: # --- PROXY DISABLED ---
+    #             logger.warning(f"hCaptcha element initially detected by BeautifulSoup, but might be JS rendered. Proceeding with Playwright check for {url}.") # --- PROXY DISABLED ---
+    #         else: # --- PROXY DISABLED ---
+    #             logger.debug(f"hCaptcha not found in initial HTML, proceeding with BeautifulSoup parsing for {url}") # --- PROXY DISABLED ---
+    #             captcha_sitekey_v2 = re.search(r'data-sitekey="([^"]+)"', html_content) # --- PROXY DISABLED ---
+    #             captcha_sitekey_v3 = re.search(r'sitekey: ?"([^"]+)"', html_content) # --- PROXY DISABLED ---
+    #             captcha_sitekey_invisible = re.search(r'recaptcha\.render\("([^"]+)", {', html_content) # --- PROXY DISABLED ---
 
-                        elif captcha_sitekey_v3 and not hcaptcha_element:
-                            captcha_sitekey = captcha_sitekey_v3.group(1)
-                            logger.warning(f"ReCAPTCHA v3 detected on {url}, sitekey: {captcha_sitekey[:20]}...")
-                            captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v3', current_proxy)
-                            if captcha_response:
-                                metrics['captcha_solved'].inc()
-                                logger.info(f"reCAPTCHA v3 solved (although v3 solving is skipped by default).")
-                            else:
-                                logger.warning(f"ReCAPTCHA v3 solving skipped or failed for {url}")
-                                metrics['crawl_errors'].labels(type='captcha_skipped_v3', proxy=proxy_key).inc()
-                                return None
+    #             if captcha_sitekey_v2 and not hcaptcha_element: # --- PROXY DISABLED ---
+    #                 captcha_sitekey = captcha_sitekey_v2.group(1) # --- PROXY DISABLED ---
+    #                 logger.warning(f"ReCAPTCHA v2 detected on {url}, sitekey: {captcha_sitekey[:20]}...") # --- PROXY DISABLED ---
+    #                 captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', attempted_proxy) # Use attempted_proxy # --- PROXY DISABLED ---
+    #                 if captcha_response: # --- PROXY DISABLED ---
+    #                     metrics['captcha_solved'].inc() # --- PROXY DISABLED ---
+    #                     logger.info(f"reCAPTCHA v2 solved, proceeding with request...") # --- PROXY DISABLED ---
+    #                     captcha_params = {'g-recaptcha-response': captcha_response} # --- PROXY DISABLED ---
+    #                     resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{attempted_proxy}" if attempted_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Use attempted_proxy # --- PROXY DISABLED ---
+    #                     if resp_after_captcha.status == 200: # --- PROXY DISABLED ---
+    #                         html_content = await resp_after_captcha.text() # --- PROXY DISABLED ---
+    #                         soup = BeautifulSoup(html_content, 'lxml') # --- PROXY DISABLED ---
+    #                         text_content = soup.get_text(separator=' ', strip=True).lower() # --- PROXY DISABLED ---
+    #                     else: # --- PROXY DISABLED ---
+    #                         logger.error(f"reCAPTCHA v2 solve failed to get 200 OK, status: {resp_after_captcha.status}") # --- PROXY DISABLED ---
+    #                         metrics['crawl_errors'].labels(type='captcha_failed_http', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                         update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #                         metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                         return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
+    #                 else: # --- PROXY DISABLED ---
+    #                     logger.error(f"ReCAPTCHA v2 solving failed for {url}") # --- PROXY DISABLED ---
+    #                     metrics['crawl_errors'].labels(type='captcha_unsolved_v2', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                     update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #                     metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                     return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
 
-                        elif captcha_sitekey_invisible and not hcaptcha_element:
-                            captcha_sitekey = captcha_sitekey_invisible.group(1)
-                            logger.warning(f"Invisible reCAPTCHA detected on {url}, element ID: {captcha_sitekey[:20]}...")
-                            captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', current_proxy)
-                            if captcha_response:
-                                metrics['captcha_solved'].inc()
-                                logger.info(f"Invisible reCAPTCHA solved, proceeding with request...")
-                                captcha_params = {'g-recaptcha-response': captcha_response}
-                                resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{current_proxy}" if current_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context)
-                                if resp_after_captcha.status == 200:
-                                    html_content = await resp_after_captcha.text()
-                                    soup = BeautifulSoup(html_content, 'lxml')
-                                    text_content = soup.get_text(separator=' ', strip=True).lower()
-                                else:
-                                    logger.error(f"Invisible reCAPTCHA solve failed to get 200 OK, status: {resp_after_captcha.status}")
-                                    metrics['crawl_errors'].labels(type='captcha_failed_http_invisible', proxy=proxy_key).inc()
-                                    update_proxy_score(proxy_key, False)
-                                    return None
-                            else:
-                                logger.error(f"Invisible reCAPTCHA solving failed for {url}")
-                                metrics['crawl_errors'].labels(type='captcha_unsolved_invisible', proxy=proxy_key).inc()
-                                update_proxy_score(proxy_key, False)
-                                return None
+    #             elif captcha_sitekey_v3 and not hcaptcha_element: # --- PROXY DISABLED ---
+    #                 captcha_sitekey = captcha_sitekey_v3.group(1) # --- PROXY DISABLED ---
+    #                 logger.warning(f"ReCAPTCHA v3 detected on {url}, sitekey: {captcha_sitekey[:20]}...") # --- PROXY DISABLED ---
+    #                 captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v3', attempted_proxy) # Use attempted_proxy # --- PROXY DISABLED ---
+    #                 if captcha_response: # --- PROXY DISABLED ---
+    #                     metrics['captcha_solved'].inc() # --- PROXY DISABLED ---
+    #                     logger.info(f"reCAPTCHA v3 solved (although v3 solving is skipped by default).") # --- PROXY DISABLED ---
+    #                 else: # --- PROXY DISABLED ---
+    #                     logger.warning(f"ReCAPTCHA v3 solving skipped or failed for {url}") # --- PROXY DISABLED ---
+    #                     metrics['crawl_errors'].labels(type='captcha_skipped_v3', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                     metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                     return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
 
-                        parsed_domain = urlparse(url).netloc.lower() # Domain Filter Adjustment - Point 5 - Check against ALLOWED_DOMAINS first
-                        if (parsed_domain in GENERIC_DOMAINS or any(blocked in parsed_domain for blocked in GENERIC_DOMAINS)): # Domain Filter Adjustment - Point 5 - Refined domain check
-                            logger.warning(f"Skipping generic domain URL: {url}")
-                            metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc()
-                            return None
-
-
-                        if BAD_PATH_PATTERN.search(parsed_url.path):
-                            logger.warning(f"Skipping URL due to bad path pattern: {url}")
-                            metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc()
-                            return None
-
-
-
-                        domain = urlparse(url).netloc.replace('www.', '')
-
-                        emails = extract_emails(html_content, domain)
-                        phones = extract_phone_numbers(text_content)
-                        address = extract_address(soup)
-                        extracted_name = extract_company_name(url)
-                        if not extracted_name or extracted_name == "N/A":
-                            extracted_name_element = soup.find("h1") or soup.find("title")
-                            if extracted_name_element:
-                                extracted_name = extracted_name_element.text.strip()
-                            else:
-                                extracted_name = "N/A"
+    #             elif captcha_sitekey_invisible and not hcaptcha_element: # --- PROXY DISABLED ---
+    #                 captcha_sitekey = captcha_sitekey_invisible.group(1) # --- PROXY DISABLED ---
+    #                 logger.warning(f"Invisible reCAPTCHA detected on {url}, element ID: {captcha_sitekey[:20]}...") # --- PROXY DISABLED ---
+    #                 captcha_response = await solve_captcha(url, captcha_sitekey, 'recaptcha_v2', attempted_proxy) # Use attempted_proxy # --- PROXY DISABLED ---
+    #                 if captcha_response: # --- PROXY DISABLED ---
+    #                     metrics['captcha_solved'].inc() # --- PROXY DISABLED ---
+    #                     logger.info(f"Invisible reCAPTCHA solved, proceeding with request...") # --- PROXY DISABLED ---
+    #                     captcha_params = {'g-recaptcha-response': captcha_response} # --- PROXY DISABLED ---
+    #                     resp_after_captcha = await session.get(url, params=captcha_params, headers=headers, proxy=f"http://{attempted_proxy}" if attempted_proxy else None, timeout=CLIENT_TIMEOUT, ssl=ssl_context) # Use attempted_proxy # --- PROXY DISABLED ---
+    #                     if resp_after_captcha.status == 200: # --- PROXY DISABLED ---
+    #                         html_content = await resp_after_captcha.text() # --- PROXY DISABLED ---
+    #                         soup = BeautifulSoup(html_content, 'lxml') # --- PROXY DISABLED ---
+    #                         text_content = soup.get_text(separator=' ', strip=True).lower() # --- PROXY DISABLED ---
+    #                     else: # --- PROXY DISABLED ---
+    #                         logger.error(f"Invisible reCAPTCHA solve failed to get 200 OK, status: {resp_after_captcha.status}") # --- PROXY DISABLED ---
+    #                         metrics['crawl_errors'].labels(type='captcha_failed_http_invisible', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                         update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #                         metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                         return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
+    #                 else: # --- PROXY DISABLED ---
+    #                     logger.error(f"Invisible reCAPTCHA solving failed for {url}") # --- PROXY DISABLED ---
+    #                     metrics['crawl_errors'].labels(type='captcha_unsolved_invisible', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                     update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #                     metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #                     return None # Stop proxy attempts and fallback to direct # --- PROXY DISABLED ---
 
 
-                        address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info
-                        extracted_city = "N/A" # Default if city extraction fails (though we are not using it now for database city) # --- KEEP DEFAULT VALUE ---
+    #             if BAD_PATH_PATTERN.search(parsed_url.path): # --- PROXY DISABLED ---
+    #                 logger.warning(f"Skipping URL due to bad path pattern: {url}") # --- PROXY DISABLED ---
+    #                 metrics['crawl_errors'].labels(type='bad_path_pattern', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                 return None # --- PROXY DISABLED ---
+
+    #             domain = urlparse(url).netloc.lower() # --- PROXY DISABLED ---
+    #             if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # --- PROXY DISABLED ---
+    #                 logger.warning(f"Skipping generic domain URL: {url}") # --- PROXY DISABLED ---
+    #                 metrics['crawl_errors'].labels(type='generic_domain', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #                 return None # --- PROXY DISABLED ---
 
 
-                        extracted_data.name = extracted_name
-                        extracted_data.email = emails
-                        extracted_data.phoneNumber = phones
-                        extracted_data.city = city # DIRECTLY ASSIGN CITY FROM CONTEXT - NO MORE OVERWRITING - **CONFIRM CITY HERE**
+    #             domain = urlparse(url).netloc.replace('www.', '') # --- PROXY DISABLED ---
+
+    #             emails = extract_emails(html_content, domain) # --- PROXY DISABLED ---
+    #             phones = extract_phone_numbers(text_content) # --- PROXY DISABLED ---
+    #             address = extract_address(soup) # --- PROXY DISABLED ---
+    #             extracted_name = extract_company_name(url) # --- PROXY DISABLED ---
+    #             if not extracted_name or extracted_name == "N/A": # --- PROXY DISABLED ---
+    #                 extracted_name_element = soup.find("h1") or soup.find("title") # --- PROXY DISABLED ---
+    #                 if extracted_name_element: # --- PROXY DISABLED ---
+    #                     extracted_name = extracted_name_element.text.strip() # --- PROXY DISABLED ---
+    #                 else: # --- PROXY DISABLED ---
+    #                     extracted_name = "N/A" # --- PROXY DISABLED ---
 
 
-                        logger.info(f"Data extracted successfully from {url} (direct scrape), name: {extracted_name}, emails: {emails}, phones: {phones}, city: {city}") # Log city from context - **CONFIRM CITY HERE**
-                        metrics['extraction_success'].inc()
-                        logger.debug(f"Exiting crawl_and_extract_async successfully for {url}, returning data: {extracted_data}") # DEBUG LOG - EXIT SUCCESS - **CONFIRM CITY HERE**
-
-                        return extracted_data
-
-                except aiohttp.ClientError as e:
-                    logger.error(f"aiohttp ClientError during direct scraping for {url}: {e}")
-                    metrics['request_errors'].inc()
-                    metrics['crawl_errors'].labels(type='client_error', proxy='no_proxy').inc()
-                    logger.debug(f"Exiting crawl_and_extract_async with aiohttp.ClientError for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                    return None
-                except asyncio.TimeoutError:
-                    logger.error(f"Asyncio timeout during direct scraping for {url}")
-                    metrics['request_errors'].inc()
-                    metrics['crawl_errors'].labels(type='timeout_error', proxy='no_proxy').inc()
-                    logger.debug(f"Exiting crawl_and_extract_async with asyncio.TimeoutError for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                    return None
-                except Exception as e_direct_crawl:
-                    logger.exception(f"Unexpected error during direct scraping for {url}: {e_direct_crawl}")
-                    metrics['page_extraction_errors'].inc()
-                    metrics['crawl_errors'].labels(type='extraction_error', proxy='no_proxy').inc()
-                    logger.debug(f"Exiting crawl_and_extract_async with unexpected error for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                    return None
-
-                return None
+    #             address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info # --- PROXY DISABLED ---
+    #             # Basic City extraction from address - REMOVE CITY EXTRACTION LOGIC # --- PROXY DISABLED ---
+    #             # address_parts = address_text.split(',') # --- REMOVE --- # --- PROXY DISABLED ---
+    #             # if len(address_parts) >= 2: # --- REMOVE --- # --- PROXY DISABLED ---
+    #             #     extracted_city = address_parts[-2].strip() # Assume city is second to last part # --- REMOVE --- # --- PROXY DISABLED ---
+    #             # else: # --- REMOVE --- # --- PROXY DISABLED ---
+    #             extracted_city = "N/A" # Default if city extraction fails (though we are not using it now for database city) # --- KEEP DEFAULT VALUE --- # --- PROXY DISABLED ---
 
 
-            # --- Fallback to Direct Scraping (No Proxy) ---
-            if use_proxy and proxy_pool and not current_proxy:
-                logger.warning(f"All proxies failed or none available. Attempting direct scraping without proxy for {url}")
-            elif use_proxy and proxy_pool:
-                logger.warning(f"Proxy attempts or Playwright failed for {url}. Falling back to direct scraping without proxy.")
-
-            try: # Direct scraping attempt
-                headers = {'User-Agent': random.choice(USER_AGENTS)}
-                headers.update(random.choice(HEADERS_LIST))
-                headers['Referer'] = urlparse(url).netloc
-
-                resp = await session.get(url, headers=headers, timeout=CLIENT_TIMEOUT) # No proxy here
-
-                metrics['http_status_codes'].labels(code=resp.status).inc()
-
-                if resp.status in [403, 404, 429, 500, 503]: # Still handle HTTP errors even without proxy
-                    logger.warning(f"HTTP error {resp.status} for {url} during direct scraping.")
-                    metrics['crawl_errors'].labels(type=f'http_{resp.status}', proxy='no_proxy').inc() # Label as no_proxy
-                    logger.debug(f"Exiting crawl_and_extract_async with HTTP error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                    return None # Stop if direct scraping also fails with these errors
-
-                html_content = await resp.text()
-                print("----- HTML Content (First 500 chars) - Direct Scraping -----")  # Debugging print
-                print(html_content[:500])  # Print first 500 characters
-                print("----- Text Content (First 500 chars) - Direct Scraping -----")  # Debugging print
-                soup = BeautifulSoup(html_content, 'lxml')
-                text_content = soup.get_text(separator=' ', strip=True).lower()
-                print(text_content[:500])  # Print first 500 characters
-
-                parsed_domain = urlparse(url).netloc.lower() # Domain Filter Adjustment - Point 5 - Check against ALLOWED_DOMAINS first - Direct scrape check
-                if (parsed_domain in GENERIC_DOMAINS or any(blocked in parsed_domain for blocked in GENERIC_DOMAINS)): # Domain Filter Adjustment - Point 5 - Refined domain check - Direct scrape check
-                    logger.warning(f"Skipping generic domain URL (direct scrape): {url}")
-                    metrics['crawl_errors'].labels(type='generic_domain', proxy='no_proxy').inc()
-                    logger.debug(f"Exiting crawl_and_extract_async due to generic domain (direct scrape) for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                    return None
-
-                emails = extract_emails(html_content, domain)
-                phones = extract_phone_numbers(text_content)
-                address = extract_address(soup)
-                extracted_name = extract_company_name(url) # Or find name in HTML if possible
-                if not extracted_name or extracted_name == "N/A":
-                    extracted_name_element = soup.find("h1") or soup.find("title") # Example: Try to get name from h1 or title
-                    if extracted_name_element:
-                        extracted_name = extracted_name_element.text.strip()
-                    else:
-                        extracted_name = "N/A" # Default if name not found
-
-                address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info
-
-                extracted_city = "N/A"  # Initialize extracted_city to "N/A" - but not used for database city anymore
+    #             extracted_data.name = extracted_name # --- PROXY DISABLED ---
+    #             extracted_data.email = emails # --- PROXY DISABLED ---
+    #             extracted_data.phoneNumber = phones # --- PROXY DISABLED ---
+    #             extracted_data.city = city # DIRECTLY ASSIGN CITY FROM CONTEXT - NO MORE OVERWRITING # --- PROXY DISABLED ---
 
 
-                extracted_data.name = extracted_name
-                extracted_data.email = emails
-                extracted_data.phoneNumber = phones
-                extracted_data.city = city # DIRECTLY ASSIGN CITY FROM CONTEXT - NO MORE OVERWRITING - **CONFIRM CITY HERE**
-                extracted_data.searchKeywords = [term] # Assign searchKeywords here
+    #             logger.info(f"Data extracted successfully from {url} (proxy scrape), proxy: {attempted_proxy}, name: {extracted_name}, emails: {emails}, phones: {phones}, city: {city}") # Log proxy and city from context # --- PROXY DISABLED ---
+    #             metrics['extraction_success'].inc() # --- PROXY DISABLED ---
+    #             metrics['proxy_effectiveness'].observe(1) # Record proxy success # --- PROXY DISABLED ---
+    #             logger.debug(f"Exiting crawl_and_extract_async successfully for {url} (proxy), returning data: {extracted_data}") # DEBUG LOG - EXIT SUCCESS # --- PROXY DISABLED ---
+
+    #             return extracted_data # --- PROXY DISABLED ---
+
+    #     except aiohttp.ClientError as e: # --- PROXY DISABLED ---
+    #         logger.error(f"aiohttp ClientError during proxy scraping for {url} with proxy {attempted_proxy}: {e}") # Log proxy in error message # --- PROXY DISABLED ---
+    #         metrics['request_errors'].inc() # --- PROXY DISABLED ---
+    #         metrics['crawl_errors'].labels(type='client_error', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #         update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #         metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #         logger.debug(f"Exiting crawl_and_extract_async with aiohttp.ClientError for {url} (proxy), returning None") # DEBUG LOG - EXIT FAILURE # --- PROXY DISABLED ---
+    #         return None # Fallback to direct scrape # --- PROXY DISABLED ---
+    #     except asyncio.TimeoutError: # --- PROXY DISABLED ---
+    #         logger.error(f"Asyncio timeout during proxy scraping for {url} with proxy {attempted_proxy}") # Log proxy in timeout error # --- PROXY DISABLED ---
+    #         metrics['request_errors'].inc() # --- PROXY DISABLED ---
+    #         metrics['crawl_errors'].labels(type='timeout_error', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #         update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #         metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #         logger.debug(f"Exiting crawl_and_extract_async with asyncio.TimeoutError for {url} (proxy), returning None") # DEBUG LOG - EXIT FAILURE # --- PROXY DISABLED ---
+    #         return None # Fallback to direct scrape # --- PROXY DISABLED ---
+    #     except Exception as e_proxy_crawl: # --- PROXY DISABLED ---
+    #         logger.exception(f"Unexpected error during proxy scraping for {url} with proxy {attempted_proxy}: {e_proxy_crawl}") # Log proxy in exception # --- PROXY DISABLED ---
+    #         metrics['page_extraction_errors'].inc() # --- PROXY DISABLED ---
+    #         metrics['crawl_errors'].labels(type='extraction_error', proxy=proxy_key).inc() # --- PROXY DISABLED ---
+    #         update_proxy_score(attempted_proxy, False) # Update score for attempted_proxy # --- PROXY DISABLED ---
+    #         metrics['proxy_fallback_requests'].inc() # Increment fallback counter # --- PROXY DISABLED ---
+    #         logger.debug(f"Exiting crawl_and_extract_async with unexpected error for {url} (proxy), returning None") # DEBUG LOG - EXIT FAILURE # --- PROXY DISABLED ---
+    #         return None # Fallback to direct scrape # --- PROXY DISABLED ---
+
+    #     metrics['proxy_fallback_requests'].inc() # Increment fallback counter if proxy loop finishes without success # --- PROXY DISABLED ---
+    #     try_again_with_new_proxy = False # Ensure loop exit if proxy attempts fail # --- PROXY DISABLED ---
 
 
-                logger.info(f"Data extracted successfully from {url} (direct scrape), name: {extracted_name}, emails: {emails}, phones: {phones}, city: {city}") # Log city from context - **CONFIRM CITY HERE**
-                metrics['extraction_success'].inc()
-                logger.debug(f"Exiting crawl_and_extract_async successfully (direct scrape) for {url}, returning data: {extracted_data}") # DEBUG LOG - EXIT SUCCESS - **CONFIRM CITY HERE**
+    # --- Fallback to Direct Scraping (No Proxy) ---
+    # if use_proxy and use_proxy_for_request and proxy_pool and not attempted_proxy: # Check for proxy pool being used and proxy being rotated # --- PROXY DISABLED ---
+    #     logger.warning(f"All proxies failed or none available. Attempting direct scraping without proxy for {url}") # --- PROXY DISABLED ---
+    # elif use_proxy and use_proxy_for_request and proxy_pool and attempted_proxy: # Condition for fallback logging - if proxy was attempted and failed # --- PROXY DISABLED ---
+    #     logger.warning(f"Proxy attempts failed for {url}. Falling back to direct scraping without proxy.") # --- PROXY DISABLED ---
+    # else: # Log direct scraping attempt even when proxies are not enabled/healthy # --- PROXY DISABLED ---
+    logger.info(f"Attempting direct scraping for {url} (proxies disabled or not used).")
 
 
-                return extracted_data
+    try: # Direct scraping attempt
+        headers = get_headers(url) # MODIFIED: Enhanced Header Rotation - Use get_headers()
+        headers['Referer'] = urlparse(url).netloc # Set referer for direct requests as well
 
-            except aiohttp.ClientError as e:
-                logger.error(f"aiohttp ClientError during direct scraping for {url}: {e}")
-                metrics['request_errors'].inc()
-                metrics['crawl_errors'].labels(type='client_error', proxy='no_proxy').inc() # Label as no_proxy
-                logger.debug(f"Exiting crawl_and_extract_async with aiohttp.ClientError during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                return None
-            except asyncio.TimeoutError:
-                logger.error(f"Asyncio timeout during direct scraping for {url}")
-                metrics['request_errors'].inc()
-                metrics['crawl_errors'].labels(type='timeout_error', proxy='no_proxy').inc() # Label as no_proxy
-                logger.debug(f"Exiting crawl_and_extract_async with asyncio.TimeoutError during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                return None
-            except Exception as e_direct_crawl:
-                logger.exception(f"Unexpected error during direct scraping for {url}: {e_direct_crawl}")
-                metrics['page_extraction_errors'].inc()
-                metrics['crawl_errors'].labels(type='extraction_error', proxy='no_proxy').inc() # Label as no_proxy
-                logger.debug(f"Exiting crawl_and_extract_async with unexpected error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-                return None
-    except asyncio.TimeoutError: # Timeout Optimization - Point 2 - Outer timeout catch
-        logger.warning(f"crawl_and_extract_async timed out after {CLIENT_TIMEOUT} seconds: {url}") # Timeout Optimization - Point 2
-        metrics['crawl_errors'].labels(type='function_timeout', proxy='N/A').inc() # Timeout Optimization - Point 2
-        metrics['failed_urls'].inc() # Error Recovery Flow - Point 7 - Increment failed_urls counter
-        return None # Timeout Optimization - Point 2
+        logger.debug(f"Fetching URL (direct): {url}") # Debug log for direct fetch URL
+
+        resp = await session.get(url, headers=headers, timeout=CLIENT_TIMEOUT) # No proxy here
+
+        metrics['http_status_codes'].labels(code=resp.status).inc()
+
+        if resp.status in [403, 404, 429, 500, 503]: # Still handle HTTP errors even without proxy
+            logger.warning(f"HTTP error {resp.status} for {url} during direct scraping.")
+            metrics['crawl_errors'].labels(type=f'http_{resp.status}', proxy='no_proxy').inc() # Label as no_proxy
+            if resp.status == 403: # MODIFIED: Headless Browser Fallback - Check for 403 and try headless
+                logger.info(f"Trying headless browser fallback for {url} due to 403.")
+                headless_html_content = await headless_fallback(url) # Call headless_fallback
+                if headless_html_content: # If headless fallback successful
+                    html_content = headless_html_content # Use headless content
+                    soup = BeautifulSoup(html_content, 'lxml') # Parse headless content
+                    text_content = soup.get_text(separator=' ', strip=True).lower() # Extract text from headless content
+                    logger.info(f"Headless browser fallback successful for {url}.") # Log success
+                else: # If headless fallback failed
+                    metrics['proxy_effectiveness'].observe(0) # Record direct request failure
+                    logger.debug(f"Exiting crawl_and_extract_async with HTTP error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+                    return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
+
+        html_content = await resp.text()
+        print("----- HTML Content (First 500 chars) - Direct Scraping -----")  # Debugging print
+        print(html_content[:500])  # Print first 500 characters
+        print("----- Text Content (First 500 chars) - Direct Scraping -----")  # Debugging print
+        soup = BeautifulSoup(html_content, 'lxml')
+        text_content = soup.get_text(separator=' ', strip=True).lower()
+        print(text_content[:500])  # Print first 500 characters
+
+
+        domain = urlparse(url).netloc.lower() # Extract domain for generic domain check (even for direct scraping)
+        if domain in GENERIC_DOMAINS or any(blocked in domain for blocked in GENERIC_DOMAINS): # Generic domain check for direct scraping
+            logger.warning(f"Skipping generic domain URL (direct scrape): {url}")
+            logger.debug(f"Crawl Filter - Generic Domain: {url} - Domain: {domain}") # DEBUG LOG - GENERIC DOMAIN FILTER
+            metrics['crawl_errors'].labels(type='generic_domain', proxy='no_proxy').inc()
+            metrics['proxy_effectiveness'].observe(0) # Record direct request failure
+            logger.debug(f"Exiting crawl_and_extract_async due to generic domain (direct scrape) for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+            return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
+
+
+        emails = extract_emails(html_content, domain)
+        phones = extract_phone_numbers(text_content)
+        address = extract_address(soup)
+        extracted_name = extract_company_name(url) # Or find name in HTML if possible
+        if not extracted_name or extracted_name == "N/A":
+            extracted_name_element = soup.find("h1") or soup.find("title") # Example: Try to get name from h1 or title
+            if extracted_name_element:
+                extracted_name = extracted_name_element.text.strip()
+            else:
+                extracted_name = "N/A" # Default if name not found
+
+        address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info
+
+        extracted_city = "N/A"  # Initialize extracted_city to "N/A" - but not used for database city anymore
+        # Basic City extraction from address - REMOVE CITY EXTRACTION LOGIC
+        # address_parts = address_text.split(',') # --- REMOVE ---
+        # if len(address_parts) >= 2: # --- REMOVE ---
+        #     extracted_city = address_parts[-2].strip() # Assume city is second to last part # --- REMOVE ---
+        # else: # --- REMOVE ---
+
+
+        extracted_data.name = extracted_name
+        extracted_data.email = emails
+        extracted_data.phoneNumber = phones
+        extracted_data.city = city # DIRECTLY ASSIGN CITY FROM CONTEXT - NO MORE OVERWRITING
+        extracted_data.searchKeywords = [term] # Assign searchKeywords here
+        extracted_data.status = 'success' # MODIFIED: Persist URLs on Failure - Set status to 'success'
+
+        # FIX 4: Missing Internal Link Following - Implementation of depth tracking
+        internal_links = [urljoin(url, link) for link in extract_internal_links(soup, parsed_url.netloc)] # Placeholder for internal link extraction
+        # FIX 7: Internal Link Handling - Use config constant instead of hardcoded value
+        if depth < MAX_DEPTH:
+            logger.info(f"Following internal links from {url} at depth {depth}, found {len(internal_links)} links.")
+            # Placeholder for processing internal links - You'll need to implement process_internal_links function
+            # await process_internal_links(session, internal_links, context, proxy_pool, depth + 1) # Example call - implement process_internal_links function
+
+        logger.info(f"Data extracted successfully from {url} (direct scrape), name: {extracted_name}, emails: {emails}, phones: {phones}, city: {city}") # Log city from context
+        metrics['extraction_success'].inc()
+        metrics['proxy_effectiveness'].observe(0) # Record direct request success (using 0 to differentiate from proxy success)
+        logger.debug(f"Exiting crawl_and_extract_async successfully (direct scrape) for {url}, returning data: {extracted_data}") # DEBUG LOG - EXIT SUCCESS
+
+
+        return extracted_data
+
+    except aiohttp.ClientError as e:
+        logger.error(f"aiohttp ClientError during direct scraping for {url}: {e}")
+        metrics['request_errors'].labels(type='aiohttp_client_error').inc() # MODIFIED: Request errors with type - aiohttp_client_error
+        metrics['crawl_errors'].labels(type='client_error', proxy='no_proxy').inc() # Label as no_proxy
+        metrics['proxy_effectiveness'].observe(0) # Record direct request failure
+        extracted_data.status = f'failed: aiohttp.ClientError' # MODIFIED: Persist URLs on Failure - Set status to 'failed'
+        logger.debug(f"Exiting crawl_and_extract_async with aiohttp.ClientError during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+        return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
+    except asyncio.TimeoutError:
+        logger.error(f"Asyncio timeout during direct scraping for {url}")
+        metrics['request_errors'].labels(type='asyncio_timeout').inc() # MODIFIED: Request errors with type - asyncio_timeout
+        metrics['crawl_errors'].labels(type='timeout_error', proxy='no_proxy').inc() # Label as no_proxy
+        metrics['proxy_effectiveness'].observe(0) # Record direct request failure
+        extracted_data.status = f'failed: asyncio.TimeoutError' # MODIFIED: Persist URLs on Failure - Set status to 'failed'
+        logger.debug(f"Exiting crawl_and_extract_async with asyncio.TimeoutError during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+        return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
+    except Exception as e_direct_crawl: # MODIFIED: General exception handling
+        logger.exception(f"Unexpected error during direct scraping for {url}: {e_direct_crawl}")
+        metrics['page_extraction_errors'].inc()
+        metrics['crawl_errors'].labels(type='extraction_error', proxy='no_proxy').inc() # Label as no_proxy
+        metrics['proxy_effectiveness'].observe(0) # Record direct request failure
+        logger.debug(f"Exiting crawl_and_extract_async with unexpected error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+        return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
     # --- End Fallback to Direct Scraping ---
+    except Exception as e: # MODIFIED: General exception handling
+        extracted_data.status = f'error: {str(e)[:100]}' # MODIFIED: Persist URLs on Failure - Set status to 'error'
+        return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
+    logger.debug(f"Exiting crawl_and_extract_async (all attempts failed) for {url}, returning None") # DEBUG LOG - EXIT FAILURE
+    metrics['proxy_effectiveness'].observe(0) # Record overall failure
+    return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
 
-    logger.debug(f"Exiting crawl_and_extract_async (all attempts failed) for {url}, returning None") # DEBUG LOG - EXIT FAILURE - **CONFIRM CITY HERE (implicitly None)**
-    metrics['failed_urls'].inc() # Error Recovery Flow - Point 7 - Increment failed_urls counter if all attempts fail
-    return None # Return None if both proxy and direct attempts fail
-
+# FIX 4: Missing Internal Link Following - Placeholder for internal link extraction function - Implement this based on your needs
+def extract_internal_links(soup, domain):
+    internal_links = set()
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag.get('href')
+        if href:
+            absolute_url = urljoin(f"https://{domain}", href) # Assuming https, adjust if needed or get scheme from original URL
+            parsed_link = urlparse(absolute_url)
+            if parsed_link.netloc == domain: # Check if the link is internal to the same domain
+                internal_links.add(absolute_url)
+    return list(internal_links)
 
 
 def get_proxy_pool():
+    return [] # --- PROXY DISABLED ---
     proxies = []
     provider_counts = {
         'oxylabs': 0,
@@ -652,25 +902,42 @@ def get_proxy_pool():
         'brightdata': 0
     }
 
-    # Force include Oxylabs if credentials exist
-    if os.getenv('OXLABS_USER') and os.getenv('OXLABS_PASS'):
-        proxies.append(f"{os.getenv('OXLABS_USER')}:{os.getenv('OXLABS_PASS')}@pr.oxylabs.io:7777")
-        provider_counts['oxylabs'] += 1
+    if PROXY_ROTATION_TYPE == "provider_weighted": # Provider-weighted rotation
+        providers_list = []
+        for provider, weight in PROXY_WEIGHTS.items():
+            providers_list.extend([provider] * int(weight * 100)) # Create weighted list
+        provider_choice = random.choice(providers_list) # Random weighted choice
 
-    # Force include Smartproxy if credentials exist
-    if os.getenv('SMARTPROXY_USER') and os.getenv('SMARTPROXY_PASS'):
-        proxies.append(f"{os.getenv('SMARTPROXY_USER')}:{os.getenv('SMARTPROXY_PASS')}@gate.smartproxy.com:7000")
-        provider_counts['smartproxy'] += 1
-
-    if os.getenv('BRIGHTDATA_USER') and os.getenv('BRIGHTDATA_PASS'):
-        for port in BRIGHTDATA_PORTS:
+        if provider_choice == 'oxylabs' and os.getenv('OXLABS_USER') and os.getenv('OXLABS_PASS'):
+            proxies.append(f"{os.getenv('OXLABS_USER')}:{os.getenv('OXLABS_PASS')}@pr.oxylabs.io:7777")
+            provider_counts['oxylabs'] += 1
+        elif provider_choice == 'smartproxy' and os.getenv('SMARTPROXY_USER') and os.getenv('SMARTPROXY_PASS'):
+            proxies.append(f"{os.getenv('SMARTPROXY_USER')}:{os.getenv('SMARTPROXY_PASS')}@gate.smartproxy.com:7000")
+            provider_counts['smartproxy'] += 1
+        elif provider == 'brightdata' and os.getenv('BRIGHTDATA_USER') and os.getenv('BRIGHTDATA_PASS'):
+            port = next(BRIGHTDATA_PORTS_CYCLE)
             proxy_string = f"{os.getenv('BRIGHTDATA_USER')}:{os.getenv('BRIGHTDATA_PASS')}@brd.superproxy.io:{port}"
-            if "brd.superproxy.io" in proxy_string: # Apply Bright Data HTTP fix
-                proxy_string = proxy_string.replace("https://", "http://") + "?type=http" # Force HTTP for Bright Data
+            if "brd.superproxy.io" in proxy_string:
+                proxy_string = proxy_string.replace("https://", "http://") + "?type=http"
             proxies.append(proxy_string)
             provider_counts['brightdata'] += 1
 
-    logger.info(f"Proxy pool 구성: {provider_counts}")
+    elif PROXY_ROTATION_TYPE == "round_robin": # Round-robin rotation
+        provider = next(PROXY_PROVIDERS) # Cycle through providers
+        if provider == 'oxylabs' and os.getenv('OXLABS_USER') and os.getenv('OXLABS_PASS'):
+            proxies.append(f"{os.getenv('OXLABS_USER')}:{os.getenv('OXLABS_PASS')}@pr.oxylabs.io:7777")
+            provider_counts['oxylabs'] += 1
+        elif provider == 'smartproxy' and os.getenv('SMARTPROXY_USER') and os.getenv('SMARTPROXY_PASS'):
+            proxies.append(f"{os.getenv('SMARTPROXY_USER')}:{os.getenv('SMARTPROXY_PASS')}@gate.smartproxy.com:7000")
+            provider_counts['smartproxy'] += 1
+        elif provider == 'brightdata' and os.getenv('BRIGHTDATA_USER') and os.getenv('BRIGHTDATA_PASS'):
+            port = next(BRIGHTDATA_PORTS_CYCLE)
+            proxy_string = f"{os.getenv('BRIGHTDATA_USER')}:{os.getenv('BRIGHTDATA_PASS')}@brd.superproxy.io:{port}"
+            if "brd.superproxy.io" in proxy_string:
+                proxy_string = proxy_string.replace("https://", "http://") + "?type=http"
+            proxies.append(proxy_string)
+            provider_counts['brightdata'] += 1
+    logger.info(f"Proxy pool êµ¬ì„±: {provider_counts}")
 
     if not proxies: # Check if proxies list is empty after configuration
         raise ValueError("No proxy credentials found in environment variables")
@@ -685,10 +952,11 @@ def get_proxy_pool():
         return proxies # Return ALL proxies (not limited/weighted random choices anymore)
 
 
-PROXY_REGEX = r'^(.+?:.+?@)?[\w\.-]+:\d+(\?.*)?$' # Modified regex to allow query parameters
-
+PROXY_REGEX = r'^(.+?:.+?@)?[\w\.-]+:\d+(\?.*)?$' # Modified regex to allow query parameters # --- PROXY DISABLED ---
+EMAIL_FILTER_SUFFIXES = ['.jpg', '.png', 'wixpress.com', 'sentry.io'] # Email filter suffixes - ADDED
 
 def validate_proxy_config():
+    return True # --- PROXY DISABLED ---
     if os.getenv("USE_PROXY", "False").lower() == "true":
         proxy_pool = get_proxy_pool()
         logger.debug(f"DEBUG: PROXY_POOL inside validate_proxy_config(): {proxy_pool}")
@@ -715,14 +983,8 @@ def validate_proxy_config():
         logger.info("Proxy usage disabled (USE_PROXY=false).")
         return True
 
-def validate_captcha(solution): # CAPTCHA Handling Fixes - Point 4 - Validate CAPTCHA solutions
-    if not re.match(r'^[\w-]{40,100}$', solution): # CAPTCHA Handling Fixes - Point 4 - Adjusted regex based on logs
-        logger.error("Invalid CAPTCHA format") # CAPTCHA Handling Fixes - Point 4
-        return False # CAPTCHA Handling Fixes - Point 4
-    return True # CAPTCHA Handling Fixes - Point 4
 
-
-async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=None):
+async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=None): # --- PROXY DISABLED --- #async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=None):
     global CAPTCHA_BALANCE
     if not os.getenv('TWOCAPTCHA_API_KEY'):
         logger.warning("TWOCAPTCHA_API_KEY not set, CAPTCHA solving disabled.")
@@ -756,11 +1018,11 @@ async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=N
         return None
 
     kwargs = {}
-    if current_proxy:
-        kwargs["default_proxy"] = current_proxy
-        logger.debug(f"CAPTCHA solving using proxy: {current_proxy}")
+    # if current_proxy: # --- PROXY DISABLED ---
+    #     kwargs["default_proxy"] = current_proxy # --- PROXY DISABLED ---
+    #     logger.debug(f"CAPTCHA solving using proxy: {current_proxy}") # --- PROXY DISABLED ---
 
-    max_attempts = MAX_CAPTCHA_ATTEMPTS # Reduced CAPTCHA Retries - Point 9 - Use MAX_CAPTCHA_ATTEMPTS
+    max_attempts = 2 if CAPTCHA_BALANCE > 5 else 1
 
     for attempt in range(max_attempts):
         try:
@@ -798,19 +1060,17 @@ async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=N
                 )
 
             if result and 'code' in result:
-                if validate_captcha(result['code']): # CAPTCHA Handling Fixes - Point 4 - Validate CAPTCHA solution
-                    logger.info(f"2Captcha solved successfully for {page_url} (Type: {captcha_type})...")
-                    cost = CAPTCHA_COST.get(captcha_type, 0.003) # Default cost if type not found (shouldn't happen)
-                    if captcha_type in CAPTCHA_COST:
-                        cost = CAPTCHA_COST[captcha_type] # Use specific cost if available
-                    with captcha_lock:
-                        CAPTCHA_BALANCE -= cost
-                        logger.info(f"2Captcha balance updated, cost: ${cost:.4f}, remaining balance: ${CAPTCHA_BALANCE:.2f}")
-                    return result['code']
-                else: # CAPTCHA Handling Fixes - Point 4 - If invalid solution
-                    logger.error(f"Invalid CAPTCHA solution received, attempt {attempt + 1}/{max_attempts}") # CAPTCHA Handling Fixes - Point 4
-                    if attempt + 1 >= max_attempts:
-                        break # CAPTCHA Handling Fixes - Point 4
+                if not re.match(r'^[\w-]{40,100}$', result['code']):
+                    logger.error(f"Invalid CAPTCHA solution format: {result['code']}")
+                    return None
+                logger.info(f"2Captcha solved successfully for {page_url} (Type: {captcha_type})...")
+                cost = CAPTCHA_COST.get(captcha_type, 0.003) # Default cost if type not found (shouldn't happen)
+                if captcha_type in CAPTCHA_COST:
+                    cost = CAPTCHA_COST[captcha_type] # Use specific cost if available
+                with captcha_lock:
+                    CAPTCHA_BALANCE -= cost
+                    logger.info(f"2Captcha balance updated, cost: ${cost:.4f}, remaining balance: ${CAPTCHA_BALANCE:.2f}")
+                return result['code']
             else:
                 logger.error(f"2Captcha solve failed, no code returned (Type: {captcha_type}), attempt {attempt + 1}/{max_attempts}")
                 if attempt + 1 >= max_attempts:
@@ -825,7 +1085,7 @@ async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=N
 
 async def enhanced_data_parsing(soup, text_content):
     # No enhanced data parsing needed for the new schema fields in this basic example
-    return {}
+    return None
 
 
 class PropertyManagerData(BaseModel):
@@ -837,8 +1097,8 @@ class PropertyManagerData(BaseModel):
     url: Optional[HttpUrl] = None  # Website URL
     searchKeywords: List[str] = Field(default_factory=list) # Search Keywords - from SEARCH_TERMS
     latLngPoint: Optional[str] = None  # latLngPoint - Keep if you intend to use it later
+    status: Optional[str] = 'pending' # MODIFIED: Status field for tracking crawl attempts
     lastEmailSentAt: Optional[datetime.datetime] = None # lastEmailSentAt - Keep if you intend to use it later
-    thoughts: Optional[str] = None # Re-add thoughts field if you intend to use LLM analysis
 
     @field_validator('phoneNumber')
     def validate_phone_number(cls, values: List[str]) -> List[str]:
@@ -866,18 +1126,15 @@ async def fetch_text(url, timeout, session):
         return None
 
 def update_proxy_score(proxy, success):
-     if proxy: # Check if proxy is not None before accessing PROXY_SCORES
+    pass # --- PROXY DISABLED ---
+    if proxy: # Check if proxy is not None before accessing PROXY_SCORES
         if success:
             PROXY_SCORES[proxy] = min(100, PROXY_SCORES[proxy] + PROXY_SCORE_CONFIG['success']) # Use success score from config
-            PROXY_FAILURES[proxy] = 0 # Proxy Failure Handling - Point 3 - Reset failure count on success
         else:
             PROXY_SCORES[proxy] = max(0, PROXY_SCORES[proxy] + PROXY_SCORE_CONFIG['failure']) # Use failure score from config
-            PROXY_FAILURES[proxy] += 1 # Proxy Failure Handling - Point 3 - Increment failure count
-            if PROXY_FAILURES[proxy] >= MAX_PROXY_FAILURES: # Proxy Failure Handling - Point 3 - Check if limit reached
-                PROXY_SCORES[proxy] = -1000 # Proxy Failure Handling - Point 3 - Mark proxy as bad
-                logger.warning(f"Proxy {proxy} marked as bad due to excessive failures.") # Proxy Failure Handling - Point 3
-
-        logger.debug(f"Updated score for proxy {proxy}, new score: {PROXY_SCORES[proxy]}, failures: {PROXY_FAILURES[proxy]}") # Proxy Failure Handling - Point 3
+        logger.debug(f"Updated score for proxy {proxy}, new score: {PROXY_SCORES[proxy]}")
+    else:
+        logger.debug("update_proxy_score called with proxy=None, skipping score update.")
 
 
         if PROXY_SCORES[proxy] <= PROXY_SCORE_CONFIG['min_score']: # Use min_score from config
@@ -899,17 +1156,26 @@ def decode_emails(text): # (Already in your older code - reuse it)
                 r'\1@\2.\3', text, flags=re.IGNORECASE)
     text = re.sub(r'\b(\w+)\s*\(\s*at\s*\)\s*(\w+)\s*\(\s*dot\s*\)\s*(\w+)\b',
                 r'\1@\2.\3', text, flags=re.IGNORECASE)
-    text = unescape(text)
+    text = decode_html_entities(text) # 2. Implement HTML Entity Decoding - USE decode_html_entities
     return text
 
-def extract_emails(html_content, domain):
+EMAIL_FILTER_SUFFIXES = ['.jpg', '.png', 'wixpress.com', 'sentry.io'] # Email filter suffixes - ADDED
+# FIX 5: Email Validation Overkill - Use more permissive regex
+EMAIL_PATTERN = r'\b[A-Za-z0-9._%+-]+@[A-Za-z-]+.[A-Z|a-z]{2,}\b'
+
+def extract_emails(html_content, domain): # Updated extract_emails to filter by suffix
     decoded_html_content = decode_emails(html_content)
-    email_matches = list(set(re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})*", decoded_html_content, re.IGNORECASE)))
+    email_matches = list(set(re.findall(EMAIL_PATTERN, decoded_html_content, re.IGNORECASE))) # FIX 5: Email Validation Overkill - Use EMAIL_PATTERN
     print("----- Raw Email Matches (Refined Regex + Decoding) -----")
     print(email_matches)
     logger.debug(f"Extracted email matches (raw): {email_matches}") # DEBUG LOG - RAW EMAILS
 
-    valid_emails = [email for email in email_matches if '@' in email and '.' in email]
+    # Filter emails by suffix
+    valid_emails = [email for email in email_matches if not any(email.lower().endswith(suffix) for suffix in EMAIL_FILTER_SUFFIXES)] # Filter by suffix
+    print(f"----- Filtered Email Matches (Suffixes: {EMAIL_FILTER_SUFFIXES}) -----") # DEBUG LOG - FILTERED EMAILS
+    print(valid_emails)
+    # FIX 7: Email Filter Overlap - Remove redundant '@' check
+    # valid_emails = [email for email in valid_emails if '@' in email and '.' in email] # Removed
     print("----- Validated Email Matches -----")
     print(valid_emails)
     logger.debug(f"Validated email matches: {valid_emails}") # DEBUG LOG - VALIDATED EMAILS
@@ -918,38 +1184,23 @@ def extract_emails(html_content, domain):
 
 
 def extract_phone_numbers(text_content):
-    # Reverted to older, verbose phone regex for testing
-    phone_matches = list(set(re.findall(r'''
-        (?x)                                  # Enable verbose regex mode
-        (?:tel:\+?)?                           # Optional "tel:+ " or "tel:" prefix (for tel links)
-        (?P<country_code>\d{1,3})?              # Optional country code (1-3 digits) - capture group 'country_code'
-        [-.\s]?                                # Optional separator after country code
-        \(?                                    # Optional opening parenthesis
-        (?P<area_code>\d{3})                    # Area code (3 digits) - capture group 'area_code'
-        \)?                                    # Optional closing parenthesis
-        [-.\s]?                                # Separator (hyphen, dot, or space) - optional
-        (?P<exchange_code>\d{3})                # Exchange code (3 digits) - capture group 'exchange_code'
-        [-.\s]?                                # Separator - optional
-        (?P<line_number>\d{4})                 # Line number (4 digits) - capture group 'line_number'
-        (?:ext\.?\s*(?P<extension>\d+))?       # Optional extension (e.g., ext. 123) - capture group 'extension'
-        \b                                    # Word boundary
-        ''', text_content, re.VERBOSE | re.IGNORECASE))) # Use text_content here
-    print("----- Raw Phone Matches (Older Verbose Regex) -----") # Debugging print
-    print(phone_matches)
-    logger.debug(f"Extracted phone matches (raw): {phone_matches}") # DEBUG LOG - RAW PHONES
-    # Reconstruct phone numbers as strings
-    phone_strings = []
-    for match in phone_matches:
-        country_code, area_code, exchange_code, line_number, extension = match
-        phone_number = ""
-        if country_code:
-            phone_number += f"+{country_code} "
-        phone_number += f"({area_code}) {exchange_code}-{line_number}"
-        if extension:
-            phone_number += f" ext. {extension}"
-        phone_strings.append(phone_number.strip()) # Add reconstructed number as string
-    logger.debug(f"Validated phone numbers: {phone_strings}") # DEBUG LOG - VALIDATED PHONES
-    return phone_strings
+    phone_numbers = []
+    for match in re.findall(r'[\+\(]?[1-9][0-9 \-\(\)]{7,}[0-9]', text_content): # Basic regex for phone numbers, consider improving
+        try:
+            # FIX 6: Phone Number Parsing - Use phonenumbers library for validation
+            parsed_number = phonenumbers.parse(match, "US") # Default region to US, adjust as needed
+            if phonenumbers.is_valid_number(parsed_number):
+                formatted_number = phonenumbers.format_number(parsed_number, phonenumbers.PhoneNumberFormat.E164) # Format to E.164
+                normalized_number = normalize_phone(formatted_number) # 1. Add Phone Normalization - NORMALIZE PHONE NUMBER
+                phone_numbers.append(normalized_number) # Append the normalized number
+        except phonenumbers.phonenumberutil.NumberParseException:
+            logger.debug(f"Phone number parsing failed for: {match}") # Debug log for parse failures
+            pass # Ignore if parsing fails, not a valid phone number
+
+    # 3. Add Deduplication Logic - Deduplicate phone numbers
+    unique_phones = list(set(phone_numbers))
+    logger.debug(f"Extracted and validated phone numbers: {unique_phones}") # Debug log for validated numbers
+    return unique_phones
 
 
 def extract_address(soup):
@@ -1021,7 +1272,7 @@ def extract_license_numbers(text_content):
 class RateLimiter:
     def __init__(self, requests_per_second):
         self.rate = requests_per_second
-        self.tokens = self.rate * 2  # Allow burst up to 2x capacity # Rate Limiting Adjustment
+        self.tokens = self.rate
         self.last_refill = time.monotonic()
         self.lock = asyncio.Lock()
 
@@ -1039,7 +1290,7 @@ class RateLimiter:
         now = time.monotonic()
         time_elapsed = now - self.last_refill
         tokens_to_add = time_elapsed * self.rate
-        self.tokens = min(self.rate * 2, self.tokens + tokens_to_add) #  tokens don't exceed rate * 2 # Rate Limiting Adjustment
+        self.tokens = min(self.rate, self.tokens + tokens_to_add) #  tokens don't exceed rate
         self.last_refill = now
 
     def get_delay(self):
@@ -1050,11 +1301,12 @@ class RateLimiter:
         return 0
 
 
-def is_valid_url(url_string):
+def is_valid_url(url):
+    """Basic validation to reject obviously invalid URLs."""
     try:
-        result = urlparse(url_string)
+        result = urlparse(url)
         return all([result.scheme, result.netloc]) # Check for scheme and netloc
-    except: # ADDED Error handling for URL parsing - Fixes UnboundLocalError
+    except: # ADDED Error handling for URL parsing
         return False
 
 # --- ADD validate_request FUNCTION HERE ---
@@ -1062,50 +1314,76 @@ def validate_request(url):
     """Basic validation to reject obviously invalid or unwanted URLs."""
     if not is_valid_url(url): # Use is_valid_url here
         logger.warning(f"Rejected as invalid URL: {url}")
+        logger.debug(f"Validate Request Filter - Invalid URL: {url}") # DEBUG LOG - INVALID URL
         return False
     try: # ADDED try-except block - Error Handling Fix
         parsed_url = urlparse(url) # URL parsing moved inside try block
         if BAD_PATH_PATTERN.search(parsed_url.path):
             logger.warning(f"Rejected bad path: {url}")
-            return None
+            logger.debug(f"Validate Request Filter - Bad Path: {url} - Path: {parsed_url.path}") # DEBUG LOG - BAD PATH FILTER
+            return False
     except Exception as e: # Catch URL parsing errors
         logger.error(f"URL parsing error: {str(e)}")
         return False
 
-    # --- Improved Generic Domain Check ---
-    parsed_domain = urlparse(url).netloc.lower() # Domain Filter Adjustment - Point 5 - Use parsed_domain
-    if (parsed_domain in GENERIC_DOMAINS or any(blocked in parsed_domain for blocked in GENERIC_DOMAINS)): # Domain Filter Adjustment - Point 5 - Refined domain check
-        logger.warning(f"Rejected due to generic domain: {url}")
+    # --- Improved Generic Domain Check - EXACT MATCH ---
+    domain = urlparse(url).netloc.lower() # Extract domain using urlparse
+    normalized_domain = domain.replace("www.", "") # Normalize by removing "www."
+    logger.debug(f"DEBUG - validate_request: Checking domain: {normalized_domain} for URL: {url}") # DEBUG LOG - DOMAIN BEING CHECKED
+    if normalized_domain in GENERIC_DOMAINS: # Check for EXACT domain match in GENERIC_DOMAINS
+        logger.warning(f"Rejected due to generic domain: {url}, domain: {normalized_domain}") # ADDED DOMAIN TO WARNING
+        logger.debug(f"Validate Request Filter - Generic Domain: {url} - Domain: {normalized_domain}") # DEBUG LOG - GENERIC DOMAIN FILTER
+        metrics['crawl_errors'].labels(type='generic_domain', proxy='no_proxy').inc()
+        logger.debug(f"DEBUG - validate_request: Domain {normalized_domain} found in GENERIC_DOMAINS. Rejecting.") # ADDED DEBUG LOG - REJECTION REASON
         return False
-    # --- End Improved Generic Domain Check ---
+    else:
+        logger.debug(f"DEBUG - validate_request: Domain {normalized_domain} NOT found in GENERIC_DOMAINS. Accepting.") # ADDED DEBUG LOG - ACCEPTANCE REASON
+
+    # --- End Improved Generic Domain Check --- # Keep generic domain check
 
     return True
 
 
 async def proxy_health_check(proxy_pool):
-    """Check proxy health by testing connection to httpbin.org/ip""" # Updated test URL
+    pass # --- PROXY DISABLED ---
+    """Check proxy health by testing connection to httpbin.org/ip"""
     while True:
         try:
-            test_url = "https://httpbin.org/ip" # Updated test URL
+            if not should_use_proxies(proxy_pool): # Skip health check if proxies are disabled
+                await asyncio.sleep(300) # Check every 5 minutes if disabled
+                continue
+
+            test_url = "https://httpbin.org/ip"
             session = await get_session()
             for proxy in proxy_pool:
                 try:
                     async with session.get(test_url, proxy=f"http://{proxy}", timeout=15) as response:
                         if response.status == 200:
-                            PROXY_SCORES[proxy] = min(100, PROXY_SCORES.get(proxy, 0) + PROXY_SCORE_CONFIG['success']) # Use success score from config
-                            PROXY_FAILURES[proxy] = 0 # Proxy Failure Handling - Point 3 - Reset failure count on health check success
+                            PROXY_SCORES[proxy] = min(100, PROXY_SCORES.get(proxy, 0) + PROXY_SCORE_CONFIG['success'])
                         else:
-                            PROXY_SCORES[proxy] = max(0, PROXY_SCORES.get(proxy, 0) + PROXY_SCORE_CONFIG['failure']) # Use failure score from config
-                            PROXY_FAILURES[proxy] += 1 # Proxy Failure Handling - Point 3 - Increment failure count on health check failure
-                            if PROXY_FAILURES[proxy] >= MAX_PROXY_FAILURES: # Proxy Failure Handling - Point 3 - Check if limit reached
-                                PROXY_SCORES[proxy] = -1000 # Proxy Failure Handling - Point 3 - Mark proxy as bad on health check failure
-                                logger.warning(f"Proxy {proxy} marked as bad due to excessive failures during health check.") # Proxy Failure Handling - Point 3
-                        # No score update if exception during health check - handled in update_proxy_score
+                            PROXY_SCORES[proxy] = max(0, PROXY_SCORES.get(proxy, 0) + PROXY_SCORE_CONFIG['failure']) # Penalize on exception
                 except Exception as e:
-                   logger.warning(f"Proxy health check failed for {proxy}: {e}") # Log individual proxy health check failures
-                   update_proxy_score(proxy, False) # Penalize proxy on health check failure - still penalize even on exception
-             # await session.close() # Let session pool manage closing - handled by session manager
-            await asyncio.sleep(3600)  # Check every 1 hour - reduced frequency for proxy health check
+                    logger.warning(f"Proxy health check failed for {proxy}: {e}")
+                    PROXY_SCORES[proxy] = max(0, PROXY_SCORES.get(proxy, 0) + PROXY_SCORE_CONFIG['failure']) # Penalize on exception
+                if PROXY_SCORES[proxy] < 0: # Ensure score doesn't go below 0
+                    PROXY_SCORES[proxy] = 0
+                logger.debug(f"Health check score for {proxy}: {PROXY_SCORES[proxy]}") # Debug log for proxy health score
+
+            await asyncio.sleep(3600) # Check every hour
         except Exception as e:
             logger.error(f"Proxy health check loop error: {str(e)}")
-            await asyncio.sleep(600) # Reduced frequency of health check loop error logging
+            await asyncio.sleep(600)
+
+# --- Configuration ---
+# ... existing configuration ...
+
+MAX_DEPTH = 3  # Maximum depth for internal link following
+
+# --- Utility Functions MOVED FROM crawler.py ---
+
+def normalize_phone(number): # 1. Add Phone Normalization - IMPLEMENT FUNCTION
+    return re.sub(r'\D', '', number).lstrip('1')
+
+# Implement HTML Entity Decoding
+def decode_html_entities(text): # 2. Implement HTML Entity Decoding - IMPLEMENT FUNCTION
+    return html.unescape(text)
