@@ -69,10 +69,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 CITIES = [
      # --- California - High Priority Cities (Larger Cities & Key Smaller Places) ---
-    
-    "Huntington Beach",
-    "Santa Monica",
-    "Malibu",
+
+    "State College",
     # "Temecula",
     # "Oceanside",
     # "San Clemente",
@@ -305,7 +303,7 @@ async def get_google_search_results(city, term, proxy_pool):
                 serpapi_usage["failed_searches"] += 1
                 break # Skip to next city/term
 
-            if 'search_metadata' not in results or results['search_metadata'].get('status') == ' à¦•à§à¦¯à¦¾à¦ªà¦šà¦¾ ':
+            if 'search_metadata' not in results or results['search_metadata'].get('status') == ' à¦•à§ à¦¯à¦¾à¦ªà¦šà¦¾ ':
                 logger.warning(f"SerpAPI CAPTCHA or error on page {page_num} for {city} {term}. Stopping pagination.")
                 metrics['captcha_requests'].inc()
                 metrics['captcha_failed'].inc()

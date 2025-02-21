@@ -43,6 +43,7 @@ import redis
 from time import sleep
 from playwright.async_api import async_playwright
 import phonenumbers
+from email_validator import validate_email, EmailNotValidError # NEW IMPORT - Import email_validator library
 
 # REMOVE THIS LINE FROM UTILS.PY:
 # from crawler import decode_html_entities, normalize_phone # FIX 6: Phone Number Parsing - Import phonenumbers
@@ -140,7 +141,185 @@ GENERIC_DOMAINS = {
     "avalara.com",
     "attorneysecrets.com",
     "hellolanding.com",
-    "psychologytoday.com"
+    "psychologytoday.com",
+    "corporates.com",
+    "businessinsider.com",
+    "mashvisor.com",
+    "padmapper.com",
+    "byowner.com",
+    "hotelscombined.com",
+    "claz.org",
+    "paahq.com",
+    "trip101.com",
+    "keystonenewsroom.com",
+    "hotelscombined.com",
+    "www.hotelscombined.com",
+    "patch.com",
+    "ocregister.com",
+    "nancyfornewport.com",
+    "heritagelawllp.com",
+    "newportbeachindy.com",
+    "ocrealtors.org",
+    "steadily.com",
+    "valiaoc.com",
+    "flipkey.com",
+    "superstayrentals.com",
+    "oregonbeachvacations.com",
+    "obrag.org",
+    "priorityonesd.com",
+    "missionbeach.com",
+    "sandiegoshorttermrentals.com",
+    "independent.com",
+    "noozhawk.com",
+    "seacliffsb.com",
+    "sandiegouniontribune.com",
+    "swellproperty.com",
+    "voiceofsandiego.org",
+    "crestmontrealty.com",
+    "sandiegocoastrentals.com",
+    "ashleypetersonlaw.com",
+    "socalrha.org",
+    "sacbee.com",
+    "sacramentocityexpress.com",
+    "enewspaper.latimes.com",
+    "lamag.com",
+    "laprogressive.com",
+    "keepneighborhoodsfirst.org",
+    "nbclosangeles.com",
+    "cd13.lacity.gov",
+    "losangelespropertymanagementgroup.com",
+    "culvercity.org",
+    "abc7.com",
+    "unitehere11.org",
+    "fiorelaw.com",
+    "laist.com",
+    "therealdeal.com",
+    "planning.lacounty.gov",
+    "propublica.org",
+    "pstribune.com",
+    "desertsun.com",
+    "ecode360.com",
+    "airhostsforum.com",
+    "longbeachin.org",
+    "audacy.com",
+    "newsday.com",
+    "change.org",
+    "nwpb.org",
+    "the-independent.co",
+    "mybelmontheights.org",
+    "presstelegram.com",
+    "lbpost.com",
+    "longbeachwa.gov",
+    "discoverourcoast.com",
+    "northcoastcurrent.com",
+    "bnbcalc.com",
+    "nextdoor.com", # Added nextdoor.com
+    "zola.com", # Added zola.com
+    "tripinn.com", # Added tripinn.com
+    "bluepillow.com", # Added bluepillow.com
+    "perfectforweddings.com", # Added perfectforweddings.com
+    "momondo.com", # Added momondo.com
+    "hotels.com", # Added hotels.com
+    "hotelscombined.com", # Added hotelscombined.com
+    "www.hotelscombined.com", # Added www.hotelscombined.com - although redundant, kept for clarity if user had it explicitly
+    "holidaylettings.co.uk", # Added holidaylettings.co.uk
+    "www.holidaylettings.co.uk", # Added www.holidaylettings.co.uk - redundant but kept if user had it.
+    "vacatia.com", # Added vacatia.com
+    "home-to-go.ca", # Added home-to-go.ca
+    "www.home-to-go.ca", # Added www.home-to-go.ca - redundant but kept if user had it.
+    "get-rates.com", # Added get-rates.com
+    "www.get-rates.com", # Added www.get-rates.com - redundant but kept if user had it.
+    "momondo.ca", # Added momondo.ca
+    "www.momondo.ca", # Added www.momondo.ca - redundant but kept if user had it.
+    "traveloka.com", # Added traveloka.com
+    "www.traveloka.com", # Added www.traveloka.com - redundant but kept if user had it.
+    "traveloka.com.au", # Added traveloka.com.au
+    "www.traveloka.com.au", # Added www.traveloka.com.au - redundant but kept if user had it.
+    "traveloka.com.en-th", # Added traveloka.com.en-th
+    "www.traveloka.com.en-th", # Added www.traveloka.com.en-th - redundant but kept if user had it.
+    "booked.net", # Added booked.net
+    "www.booked.net", # Added www.booked.net - redundant but kept if user had it.
+    "perfectforweddings.com", # Added perfectforweddings.com - repeated entry, removed one.
+    "visitsacramento.com", # Added visitsacramento.com
+    "www.visitsacramento.com", # Added www.visitsacramento.com - redundant but kept if user had it.
+    "visitsyv.com", # Added visitsyv.com
+    "www.visitsyv.com", # Added www.visitsyv.com - redundant but kept if user had it.
+    "visitsantabarbara.com", # Added visitsantabarbara.com - assuming typo in original data and meant visitsantabarbara.com
+    "www.visitsantabarbara.com", # Added www.visitsantabarbara.com - redundant but kept if user had it.
+    "visitsantacruz.com", # Assuming visitsantacruz.com was intended, but not in the list. If it appears, add it.
+    "www.visitsantacruz.com", # Assuming www.visitsantacruz.com was intended, but not in the list. If it appears, add it.
+    "visitsanjuancapistrano.com", # Assuming visitsanjuancapistrano.com was intended, but not in the list. If it appears, add it.
+    "www.visitsanjuancapistrano.com", # Assuming www.visitsanjuancapistrano.com was intended, but not in the list. If it appears, add it.
+    "visitsandiego.com", # Assuming visitsandiego.com was intended, but not in the list. If it appears, add it.
+    "www.visitsandiego.com", # Assuming www.visitsandiego.com was intended, but not in the list. If it appears, add it.
+    "visitsanmarcos.com", # Assuming visitsanmarcos.com was intended, but not in the list. If it appears, add it.
+    "www.visitsanmarcos.com", # Assuming www.visitsanmarcos.com was intended, but not in the list. If it appears, add it.
+    "visitsanmarcospromotions.com", # Assuming visitsanmarcospromotions.com was intended, but not in the list. If it appears, add it.
+    "www.visitsanmarcospromotions.com", # Assuming www.visitsanmarcospromotions.com was intended, but not in the list. If it appears, add it.
+    "visitsantamonica.com", # Added visitsantamonica.com
+    "www.visitsantamonica.com", # Added www.visitsantamonica.com - redundant but kept if user had it.
+    "visitsacramento.com", # Added visitsacramento.com - repeated, removed one
+    "www.visitsacramento.com", # Added www.visitsacramento.com - repeated, removed one
+    "visitsacramento.com", # Added visitsacramento.com - repeated, removed one
+    "www.visitsacramento.com", # Added www.visitsacramento.com - repeated, removed one
+    "visitpasadena.com", # Added visitpasadena.com
+    "www.visitpasadena.com", # Added www.visitpasadena.com - redundant but kept if user had it.
+    "visitgreaterpalmsprings.com", # Added visitgreaterpalmsprings.com
+    "www.visitgreaterpalmsprings.com", # Added www.visitgreaterpalmsprings.com - redundant but kept if user had it.
+    "visitcarlsbad.com", # Added visitcarlsbad.com
+    "www.visitcarlsbad.com", # Added www.visitcarlsbad.com - redundant but kept if user had it.
+    "ssf.net", # Added ssf.net (city of South San Francisco)
+    "www.ssf.net", # Added www.ssf.net - redundant but kept if user had it.
+    "escondido.gov", # Added escondido.gov (city of Escondido)
+    "www.escondido.gov", # Added www.escondido.gov - redundant but kept if user had it.
+    "cityofsacramento.gov", # Added cityofsacramento.gov
+    "www.cityofsacramento.gov", # Added www.cityofsacramento.gov - redundant but kept if user had it.
+    "cityofdhs.org", # Added cityofdhs.org (Desert Hot Springs)
+    "www.cityofdhs.org", # Added www.cityofdhs.org - redundant but kept if user had it.
+    "ci.anaheim.ca.us", # Added ci.anaheim.ca.us - assuming it was intended, though anaheim.net is used later.
+    "www.ci.anaheim.ca.us", # Added www.ci.anaheim.ca.us - redundant but kept if user had it.
+    "anaheim.net", # Added anaheim.net (city of Anaheim)
+    "www.anaheim.net", # Added www.anaheim.net - redundant but kept if user had it.
+    "longbeach.gov", # Added longbeach.gov
+    "www.longbeach.gov", # Added www.longbeach.gov - redundant but kept if user had it.
+    "carlsbadca.gov", # Added carlsbadca.gov (city of Carlsbad)
+    "www.carlsbadca.gov", # Added www.carlsbadca.gov - redundant but kept if user had it.
+    "palmdesert.gov", # Added palmdesert.gov (city of Palm Desert)
+    "www.palmdesert.gov", # Added www.palmdesert.gov - redundant but kept if user had it.
+    "lacity.gov", # Added lacity.gov (city of Los Angeles)
+    "www.lacity.gov", # Added www.lacity.gov - redundant but kept if user had it.
+    "lacity.org", # Added lacity.org - assuming typo and meant .gov, but kept in case it's valid
+    "www.lacity.org", # Added www.lacity.org - redundant but kept if user had it.
+    "lacity.com", # Added lacity.com - assuming typo and meant .gov, but kept in case it's valid
+    "www.lacity.com", # Added www.lacity.com - redundant but kept if user had it.
+    "lacounty.gov", # Added lacounty.gov (LA County)
+    "www.lacounty.gov", # Added www.lacounty.gov - redundant but kept if user had it.
+    "ssf.ca.us", # Added ssf.ca.us - assuming typo and meant .net, but kept in case it's valid
+    "www.ssf.ca.us", # Added www.ssf.ca.us - redundant but kept if user had it.
+    "ci.carlsbad.ca.us", # Added ci.carlsbad.ca.us - repeated entry, removed one.
+    "www.ci.carlsbad.ca.us", # Added www.ci.carlsbad.ca.us - repeated entry, removed one.
+    "ci.pasadena.ca.us", # Added ci.pasadena.ca.us - repeated entry, removed one.
+    "www.ci.pasadena.ca.us", # Added www.ci.pasadena.ca.us - repeated entry, removed one.
+    "ci.palm-springs.ca.us", # Added ci.palm-springs.ca.us - repeated entry, removed one.
+    "www.ci.palm-springs.ca.us", # Added www.ci.palm-springs.ca.us - repeated entry, removed one.
+    "ci.newport-beach.ca.us", # Added ci.newport-beach.ca.us - repeated entry, removed one.
+    "www.ci.newport-beach.ca.us", # Added www.ci.newport-beach.ca.us - repeated entry, removed one.
+    "ci.anaheim.ca.us", # Added ci.anaheim.ca.us - repeated entry, removed one.
+    "www.ci.anaheim.ca.us", # Added www.ci.anaheim.ca.us - repeated entry, removed one.
+    "ci.long-beach.ca.us", # Added ci.long-beach.ca.us - repeated entry, removed one.
+    "www.ci.long-beach.ca.us", # Added www.ci.long-beach.ca.us - repeated entry, removed one.
+    "ci.santa-monica.ca.us", # Added ci.santa-monica.ca.us - repeated entry, removed one.
+    "www.ci.santa-monica.ca.us", # Added www.ci.santa-monica.ca.us - repeated entry, removed one.
+    "ci.san-diego.ca.us", # Added ci.san-diego.ca.us - repeated entry, removed one.
+    "www.ci.san-diego.ca.us", # Added www.ci.san-diego.ca.us - repeated entry, removed one.
+    "ci.santa-barbara.ca.us", # Added ci.santa-barbara.ca.us - repeated entry, removed one.
+    "www.ci.santa-barbara.ca.us", # Added www.ci.santa-barbara.ca.us - repeated entry, removed one.
+    "zillow.com", # Added zillow.com - repeated, removed one.
+    "realtor.com", # Added realtor.com - repeated, removed one.
+    "apartments.com", # Added apartments.com - repeated, removed one.
+    "redfin.com", # Added redfin.com - repeated, removed one.
+    "homes.com", # Added homes.com - repeated, removed one.
+    "zumper.com", # Added zumper.com - repeated, removed one.
 }
 
 filtered_domains = set()
@@ -150,7 +329,7 @@ for domain in GENERIC_DOMAINS:
 
 GENERIC_DOMAINS = filtered_domains
 
-BAD_PATH_SEGMENTS = ["/news", "/video", "/business"] # List of path segments to block
+BAD_PATH_SEGMENTS = ["/news", "/video", "/business", "/articles", "/news", "/story", "/Homes-for-sale", "news", "articles", "story", "homes-for-sale", '/articles', '/news', '/story', '/homes-for-sale'] # List of path segments to block - ADDED NEW PATHS - ADDED AGAIN FOR GOOD MEASURE
 
 filtered_domains = set()
 for domain in GENERIC_DOMAINS:
@@ -159,7 +338,7 @@ for domain in GENERIC_DOMAINS:
 
 GENERIC_DOMAINS = filtered_domains
 
-BAD_PATH_PATTERN = re.compile(r'/(category|tag|author)/', re.IGNORECASE) # Removed 'page' from bad path pattern
+BAD_PATH_PATTERN = re.compile(r'/(category|tag|author|news|articles|story|homes-for-sale|articles|news|story|Homes-for-sale)/', re.IGNORECASE) # Removed 'page' from bad path pattern - UPDATED BAD_PATH_PATTERN - UPDATED AGAIN FOR GOOD MEASURE
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -701,7 +880,7 @@ async def crawl_and_extract_async(session, context, proxy_pool=None, current_pro
 
 
     #             address_text = extract_address(soup) # Address extraction - KEEP THIS if you still want to extract address info # --- PROXY DISABLED ---
-    #             # Basic City extraction from address - REMOVE CITY EXTRACTION LOGIC # --- PROXY DISABLED ---
+    #             # Basic City extraction from address - REMOVE CITY EXTRACTION LOGIC # --- REMOVE --- # --- PROXY DISABLED ---
     #             # address_parts = address_text.split(',') # --- REMOVE --- # --- PROXY DISABLED ---
     #             # if len(address_parts) >= 2: # --- REMOVE --- # --- PROXY DISABLED ---
     #             #     extracted_city = address_parts[-2].strip() # Assume city is second to last part # --- REMOVE --- # --- PROXY DISABLED ---
@@ -953,7 +1132,30 @@ def get_proxy_pool():
 
 
 PROXY_REGEX = r'^(.+?:.+?@)?[\w\.-]+:\d+(\?.*)?$' # Modified regex to allow query parameters # --- PROXY DISABLED ---
-EMAIL_FILTER_SUFFIXES = ['.jpg', '.png', 'wixpress.com', 'sentry.io'] # Email filter suffixes - ADDED
+EMAIL_FILTER_SUFFIXES = [
+    '.jpg', '.png', 'wixpress.com', 'sentry.io',
+    '.gif', '.jpeg', '.svg', '.bmp',  # Image suffixes
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', # Document suffixes
+    'example.com', 'domain.com', 'yourdomain.com', 'email.com', 'name.com', # Placeholder domains
+    'no-reply', 'noreply', 'donotreply', 'do-not-reply', 'no.reply', # No-reply indicators
+    'unsubscribe', 'optout', 'opt-out', # Unsubscribe/opt-out related
+    'newsletter', 'marketing', 'promo', 'ads', 'advertising', # Marketing/promotional
+    'support', 'help', 'feedback', 'info', # Generic info/support (use with caution - might filter valid emails)
+    'sales', # Generic sales (use with caution - might filter valid emails)
+    'techsupport', 'webmaster', 'postmaster', 'abuse', # Technical/admin emails
+    'privacy', 'legal', 'terms', 'policy', # Legal/policy emails
+    'careers', 'jobs', 'hr', 'recruiting', # HR/recruitment emails
+    'billing', 'accounts', 'finance', 'payments', # Billing/finance emails
+    'notifications', 'alerts', 'updates', 'messages', # Notification emails
+    'cdn.', '.css', '.js', '.xml', '.json', '.txt', '.ico', '.rss', '.atom',  # File extensions and CDN
+    'w3.org', 'apache.org', 'mozilla.org', 'opensource.org', 'ietf.org', # Common website infrastructure domains
+    'github.com', 'stackoverflow.com', # Developer/community platforms
+    'wordpress.com', 'squarespace.com', 'weebly.com', 'godaddy.com', # Website builder platforms
+    'wikimedia.org', 'wikipedia.org', 'creativecommons.org', # Educational/non-profit
+    'youtu.be', 'vimeo.com', 'dailymotion.com', 'soundcloud.com', # Video/audio platforms
+    'paypal.com', 'stripe.com', 'shopify.com', 'amazon.com', 'ebay.com' # E-commerce/payment platforms (add more relevant ones)
+    # ... Add more suffixes based on your observations of irrelevant emails ...
+]
 
 def validate_proxy_config():
     return True # --- PROXY DISABLED ---
@@ -1159,27 +1361,43 @@ def decode_emails(text): # (Already in your older code - reuse it)
     text = decode_html_entities(text) # 2. Implement HTML Entity Decoding - USE decode_html_entities
     return text
 
-EMAIL_FILTER_SUFFIXES = ['.jpg', '.png', 'wixpress.com', 'sentry.io'] # Email filter suffixes - ADDED
+# EMAIL_FILTER_SUFFIXES = ['.jpg', '.png', 'wixpress.com', 'sentry.io'] # Email filter suffixes - ADDED # Replaced with expanded list above
 # FIX 5: Email Validation Overkill - Use more permissive regex
-EMAIL_PATTERN = r'\b[A-Za-z0-9._%+-]+@[A-Za-z-]+.[A-Z|a-z]{2,}\b'
+# EMAIL_PATTERN = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}(?:\.[A-Z|a-z]{2,})?\b' # REMOVED - No longer needed
 
-def extract_emails(html_content, domain): # Updated extract_emails to filter by suffix
+def extract_emails(html_content, domain): # Updated extract_emails to use email-validator
     decoded_html_content = decode_emails(html_content)
-    email_matches = list(set(re.findall(EMAIL_PATTERN, decoded_html_content, re.IGNORECASE))) # FIX 5: Email Validation Overkill - Use EMAIL_PATTERN
-    print("----- Raw Email Matches (Refined Regex + Decoding) -----")
-    print(email_matches)
-    logger.debug(f"Extracted email matches (raw): {email_matches}") # DEBUG LOG - RAW EMAILS
+    # Use a basic regex to find potential email-like strings (for initial extraction)
+    potential_emails = list(set(re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', decoded_html_content, re.IGNORECASE)))
 
-    # Filter emails by suffix
-    valid_emails = [email for email in email_matches if not any(email.lower().endswith(suffix) for suffix in EMAIL_FILTER_SUFFIXES)] # Filter by suffix
-    print(f"----- Filtered Email Matches (Suffixes: {EMAIL_FILTER_SUFFIXES}) -----") # DEBUG LOG - FILTERED EMAILS
-    print(valid_emails)
-    # FIX 7: Email Filter Overlap - Remove redundant '@' check
-    # valid_emails = [email for email in valid_emails if '@' in email and '.' in email] # Removed
-    print("----- Validated Email Matches -----")
+    valid_emails = []
+    for email_candidate in potential_emails:
+        try:
+            email = validate_email(email_candidate, check_deliverability=False).normalized # Use email-validator for validation, deliverability check is computationally expensive and not strictly needed for extraction
+            valid_emails.append(email) # If valid, append the normalized email
+        except EmailNotValidError as e:
+            logger.debug(f"Invalid email address found and filtered out: {email_candidate} - Reason: {e}") # Log invalid emails, but don't raise error
+
+    # Filter emails by suffix (same filtering logic as before)
+    valid_emails = [email for email in valid_emails if not any(email.lower().endswith(suffix) for suffix in EMAIL_FILTER_SUFFIXES)]
+
+        # Heuristic filtering based on local part (before @) - ADDED THIS BLOCK (same as before)
+    business_email_keywords = [
+        'info', 'contact', 'sales', 'booking', 'reservations', 'admin', 'management', 'office', 'support', 'help', 'guest', 'rental', 'property'
+    ]
+
+    valid_emails = [
+        email for email in valid_emails
+        if any(keyword in email.lower().split('@')[0] for keyword in business_email_keywords) or  # Check for keywords in local part
+           re.match(r'^[a-zA-Z]+\.[a-zA-Z]+', email.split('@')[0]) or # Check for name-like pattern (e.g., john.doe)
+           re.match(r'^[a-zA-Z]+$', email.split('@')[0]) # Check for single word name-like pattern (e.g., john)
+    ]
+    # End of ADDED BLOCK
+
+
+    print(f"----- Validated Email Matches (using email-validator) -----")
     print(valid_emails)
     logger.debug(f"Validated email matches: {valid_emails}") # DEBUG LOG - VALIDATED EMAILS
-
     return valid_emails
 
 
@@ -1334,9 +1552,6 @@ def validate_request(url):
         logger.warning(f"Rejected due to generic domain: {url}, domain: {normalized_domain}") # ADDED DOMAIN TO WARNING
         logger.debug(f"Validate Request Filter - Generic Domain: {url} - Domain: {normalized_domain}") # DEBUG LOG - GENERIC DOMAIN FILTER
         metrics['crawl_errors'].labels(type='generic_domain', proxy='no_proxy').inc()
-        logger.debug(f"DEBUG - validate_request: Domain {normalized_domain} found in GENERIC_DOMAINS. Rejecting.") # ADDED DEBUG LOG - REJECTION REASON
-        return False
-    else:
         logger.debug(f"DEBUG - validate_request: Domain {normalized_domain} NOT found in GENERIC_DOMAINS. Accepting.") # ADDED DEBUG LOG - ACCEPTANCE REASON
 
     # --- End Improved Generic Domain Check --- # Keep generic domain check
