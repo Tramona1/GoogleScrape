@@ -163,8 +163,6 @@ GENERIC_DOMAINS = {
     "steadily.com",
     "valiaoc.com",
     "flipkey.com",
-    "superstayrentals.com",
-    "oregonbeachvacations.com",
     "obrag.org",
     "priorityonesd.com",
     "missionbeach.com",
@@ -286,11 +284,6 @@ GENERIC_DOMAINS = {
     "www.carlsbadca.gov", # Added www.carlsbadca.gov - redundant but kept if user had it.
     "palmdesert.gov", # Added palmdesert.gov (city of Palm Desert)
     "www.palmdesert.gov", # Added www.palmdesert.gov - redundant but kept if user had it.
-    "lacity.gov", # Added lacity.gov (city of Los Angeles)
-    "www.lacity.gov", # Added www.lacity.gov - redundant but kept if user had it.
-    "lacity.org", # Added lacity.org - assuming typo and meant .gov, but kept in case it's valid
-    "www.lacity.org", # Added www.lacity.org - redundant but kept if user had it.
-    "lacity.com", # Added lacity.com - assuming typo and meant .gov, but kept in case it's valid
     "www.lacity.com", # Added www.lacity.com - redundant but kept if user had it.
     "lacounty.gov", # Added lacounty.gov (LA County)
     "www.lacounty.gov", # Added www.lacounty.gov - redundant but kept if user had it.
@@ -320,6 +313,19 @@ GENERIC_DOMAINS = {
     "redfin.com", # Added redfin.com - repeated, removed one.
     "homes.com", # Added homes.com - repeated, removed one.
     "zumper.com", # Added zumper.com - repeated, removed one.
+    "trulia.com",
+    "homesnap.com",
+    "rent.com",
+    "realtytrac.com",
+    "loopnet.com",
+    "propublica.org",
+    "keyhousing.com",
+    "hostaway.com",
+    "guesty.com",
+    "propublica.org",
+    "masterhost.ca",
+    "masterhost.com",
+
 }
 
 filtered_domains = set()
@@ -329,7 +335,7 @@ for domain in GENERIC_DOMAINS:
 
 GENERIC_DOMAINS = filtered_domains
 
-BAD_PATH_SEGMENTS = ["/news", "/video", "/business", "/articles", "/news", "/story", "/Homes-for-sale", "news", "articles", "story", "homes-for-sale", '/articles', '/news', '/story', '/homes-for-sale'] # List of path segments to block - ADDED NEW PATHS - ADDED AGAIN FOR GOOD MEASURE
+BAD_PATH_SEGMENTS = ["/news", "/video", "/business", "/articles", "/news", "/story", "/Homes-for-sale", "news", "articles", "story", "homes-for-sale", '/articles', '/news', '/story', '/homes-for-sale', '/blog'] # List of path segments to block - ADDED NEW PATHS - ADDED AGAIN FOR GOOD MEASURE
 
 filtered_domains = set()
 for domain in GENERIC_DOMAINS:

@@ -71,8 +71,8 @@ CITIES = [
      # --- California - High Priority Cities (Larger Cities & Key Smaller Places) ---
 
     "State College",
-    # "Temecula",
-    # "Oceanside",
+    "Newport Beach",
+    "San Diego",
     # "San Clemente",
     # "Dana Point",
     # "Irvine",
@@ -105,6 +105,7 @@ PAGES_PER_QUERY = 15
 OUTPUT_CSV_FILENAME = "property_managers_data.csv"
 CONCURRENT_REQUESTS = 10 # Reduced Concurrent Requests - Production Tuning
 LOG_LEVEL = logging.DEBUG
+LOG_FILE = "crawler.log"  # Define the log file name # <-- ADDED LOG_FILE VARIABLE
 # FIX 3: Content Length Requirements - Adjust length threshold:
 MIN_CONTENT_LENGTH = 300  # Allow shorter contact pages # Changed here from 1200 to 300
 # FIX 7: Internal Link Handling - Use config constant instead of hardcoded value
@@ -128,7 +129,14 @@ LLM_CONCURRENCY = 1     # Reduced from 10 - Production Tuning - Proportional to 
 
 # --- End Configuration ---
 
-logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),  # Add a FileHandler to write to the log file # <-- ADDED FileHandler
+        logging.StreamHandler()        # Keep the StreamHandler to also output to the console (optional)
+    ]
+)
 logger = logging.getLogger(__name__)
 
 serpapi_usage = {
