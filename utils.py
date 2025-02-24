@@ -1,5 +1,7 @@
+# utils.py - FULL CODE WITH ALL IMPLEMENTED CHANGES
 import asyncio
 import aiohttp
+from aiohttp import AsyncResolver, TCPConnector, ClientSession
 from bs4 import BeautifulSoup
 import re # 1. Add Phone Normalization - IMPORT RE
 import time
@@ -9,6 +11,7 @@ import urllib.robotparser
 from urllib.parse import urlparse, urljoin, urlunparse
 import os
 from twocaptcha import TwoCaptcha
+from prometheus_client import Summary, Counter, Gauge, REGISTRY # MODIFIED: Import Summary, Counter, Gauge, REGISTRY
 from pydantic import ( # Updated imports - field_validator and ValidationInfo added
     BaseModel,
     EmailStr,
@@ -25,28 +28,14 @@ import html # 2. Implement HTML Entity Decoding - IMPORT HTML
 import random
 import socket
 from fake_useragent import UserAgent
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-from urllib.parse import urlparse
-import struct
-from curl_cffi import requests
-import threading
-from functools import lru_cache
-from prometheus_client import Summary, Counter, Gauge, REGISTRY, start_http_server
-from curl_cffi.curl import CurlError
-from collections import defaultdict
-import async_timeout
-from random import choices
-from itertools import cycle
-from aiohttp import ClientSession, TCPConnector, AsyncResolver
-from async_lru import alru_cache
-import redis
-from time import sleep
-from playwright.async_api import async_playwright
 import phonenumbers
 from email_validator import validate_email, EmailNotValidError # NEW IMPORT - Import email_validator library
+from playwright.async_api import async_playwright # Import async_playwright
+from collections import defaultdict # Import defaultdict
+from itertools import cycle  # Import cycle
+import async_timeout # Import async_timeout
+import threading # IMPORT THREADING - FIX PYLANCE ERROR
 
-# REMOVE THIS LINE FROM UTILS.PY:
-# from crawler import decode_html_entities, normalize_phone # FIX 6: Phone Number Parsing - Import phonenumbers
 
 MAX_CAPTCHA_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
@@ -493,7 +482,9 @@ def configure_metrics():
         'crawl_errors': Counter('crawl_errors', 'Crawl errors', ['type', 'proxy']),
         'proxy_health_state': Gauge('proxy_health_state', 'Proxy Health State (1=active, 0=disabled)'), # Proxy health state metric # --- PROXY DISABLED ---
         'proxy_fallback_requests': Counter('proxy_fallback_requests', 'Requests served without proxies'), # Proxy fallback requests metric # --- PROXY DISABLED ---
-        'proxy_effectiveness': Summary('proxy_effectiveness', 'Success rate of proxy vs direct requests') # Proxy effectiveness summary # --- PROXY DISABLED ---
+        'proxy_effectiveness': Summary('proxy_effectiveness', 'Success rate of proxy vs direct requests'), # Proxy effectiveness summary # --- PROXY DISABLED ---
+        'encoding_errors': Counter('encoding_errors', 'Text decoding errors'), # ADDED: encoding_errors metric
+        'pagination_misses': Counter('pagination_misses', 'Missing pagination links') # ADDED: pagination_misses metric
     }
 
 
@@ -971,7 +962,8 @@ async def crawl_and_extract_async(session, context, proxy_pool=None, current_pro
                     logger.debug(f"Exiting crawl_and_extract_async with HTTP error during direct scrape for {url}, returning None") # DEBUG LOG - EXIT FAILURE
                     return extracted_data # MODIFIED: Persist URLs on Failure - Return extracted_data
 
-        html_content = await resp.text()
+        # Replace line 974 (html_content = await resp.text()) with safe_text
+        html_content = await safe_text(resp) # Use safe_text for decoding
         print("----- HTML Content (First 500 chars) - Direct Scraping -----")  # Debugging print
         print(html_content[:500])  # Print first 500 characters
         print("----- Text Content (First 500 chars) - Direct Scraping -----")  # Debugging print
@@ -1292,7 +1284,7 @@ async def solve_captcha(page_url, captcha_sitekey, captcha_type, current_proxy=N
 
 
 async def enhanced_data_parsing(soup, text_content):
-    # No enhanced data parsing needed for the new schema fields in this basic example
+    # No enhanced data parsing needed for the schema-matching version focusing on direct fields
     return None
 
 
@@ -1311,11 +1303,6 @@ class PropertyManagerData(BaseModel):
     @field_validator('phoneNumber')
     def validate_phone_number(cls, values: List[str]) -> List[str]:
         return [phone.strip() for phone in values]
-
-
-async def analyze_with_ollama(company_name, website_text, model_name='deepseek-r1:latest'):
-    # Ollama analysis is not used in this schema-matching version for direct fields
-    return None
 
 
 async def analyze_batch(urls, session):
@@ -1608,3 +1595,20 @@ def normalize_phone(number): # 1. Add Phone Normalization - IMPLEMENT FUNCTION
 # Implement HTML Entity Decoding
 def decode_html_entities(text): # 2. Implement HTML Entity Decoding - IMPLEMENT FUNCTION
     return html.unescape(text)
+
+async def safe_text(response):
+    """Safely decodes response text, handling encoding errors."""
+    try:
+        return await response.text(encoding='utf-8')
+    except UnicodeDecodeError:
+        try:
+            return await response.text(encoding='latin1') # Fallback to latin1 if utf-8 fails
+        except Exception as e:
+            logger.warning(f"Text decoding failed with utf-8 and latin1: {e}. Trying to decode with replacement.")
+            try:
+                return (await response.read()).decode('utf-8', 'replace') # Decode with replacement
+            except:
+                 return "" # Return empty string if all decoding fails
+    except Exception as e:
+        logger.error(f"Error reading response text: {e}")
+        return ""

@@ -33,14 +33,13 @@ import utils  # Import utils
 from utils import (
     metrics, rotate_proxy, decay_proxy_scores, normalize_url,
     crawl_and_extract_async, analyze_batch, get_session, proxy_health_check, close_playwright, get_playwright_instance, # <-- ENSURE close_playwright and get_playwright_instance ARE HERE
-    BAD_PATH_PATTERN, GENERIC_DOMAINS, close_session, update_proxy_score, PROXY_SCORE_CONFIG # <-- ENSURE decay_scores AND update_proxy_score ARE HERE and PROXY_SCORE_CONFIG, curl_impersonated_request
+    BAD_PATH_PATTERN, GENERIC_DOMAINS, close_session, update_proxy_score, PROXY_SCORE_CONFIG, safe_text # <-- ENSURE decay_scores AND update_proxy_score ARE HERE and PROXY_SCORE_CONFIG, curl_impersonated_request, ADD safe_text
 )
 from prometheus_client import start_http_server, Counter, Gauge, REGISTRY # MODIFIED: Import REGISTRY
 import random
 import socket
 import struct
 from fake_useragent import UserAgent
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type # ADDED: Import retry, stop_after_attempt, wait_exponential
 import urllib.robotparser
 from urllib.parse import urljoin
 from collections import defaultdict
@@ -70,17 +69,21 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 CITIES = [
      # --- California - High Priority Cities (Larger Cities & Key Smaller Places) ---
 
-    "State College",
-    "Newport Beach",
-    "San Diego",
+    # # "Kahului",
+    # # "Wailuku",
+    # # "Lahaina",
+    # "Maui",
+    # "Kaneohe",
+    # "Pearl City",
+    # "Waipahu",
     # "San Clemente",
     # "Dana Point",
     # "Irvine",
-    # "Mission Viejo",
-    # "Riverside",
-    # "Ontario",
-    # "Laguna Beach",
-    # "Beverly Hills",
+    "Mission Viejo",
+    "Riverside",
+    "Ontario",
+    "Laguna Beach",
+    "Beverly Hills",
 
     # "Oakland",
     # "Berkeley",
@@ -101,7 +104,7 @@ SEARCH_TERMS = [
     "short term rentals"
 ]
 
-PAGES_PER_QUERY = 15
+PAGES_PER_QUERY = 1
 OUTPUT_CSV_FILENAME = "property_managers_data.csv"
 CONCURRENT_REQUESTS = 10 # Reduced Concurrent Requests - Production Tuning
 LOG_LEVEL = logging.DEBUG
@@ -286,9 +289,22 @@ async def get_google_search_results(city, term, proxy_pool):
                 async with async_timeout.timeout(45):
                     async with SEARCH_SEM:
                         search = GoogleSearch(params)
-                        time.sleep(10) # <--- ADD THIS DELAY - Delay before get_dict
+                        # time.sleep(10) # <--- ADD THIS DELAY - Delay before get_dict # REMOVED DELAY LINE
                         results = await asyncio.to_thread(search.get_dict)
                         logger.debug(f"Raw SerpAPI response: {json.dumps(results, indent=2)}") # <--- ADDED DEBUG LOGGING HERE - Raw response logging
+
+                        # Additional Defensive Coding Improvements - START
+                        if not isinstance(results, dict):
+                            logger.error(f"Unexpected SerpAPI response format: {type(results)}")
+                            metrics['serpapi_errors'].inc()
+                            return {"city": city, "term": term, "urls": []}
+
+                        if 'error' in results:
+                            logger.error(f"SerpAPI error: {results['error']}")
+                            metrics['serpapi_errors'].inc()
+                            return {"city": city, "term": term, "urls": []}
+                        # Additional Defensive Coding Improvements - END
+
                         if 'error' in results: # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
                             logger.error(f"SerpAPI error for query '{city} {term}', page {page_num}: {results['error']}") # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
                             metrics['serpapi_errors'].inc() # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
@@ -345,8 +361,19 @@ async def get_google_search_results(city, term, proxy_pool):
                 all_urls.extend(filtered_urls)
 
                 # --- UPDATED PAGINATION CHECK HERE ---
-                if results.get('serpapi_pagination', {}).get('next'): # Use 'serpapi_pagination' and .get('next') # Pagination fix
-                    next_page_url = results['pagination']['next_link'] # Keep extracting 'next_link'
+                # Check for modern SerpAPI pagination format first
+                if 'serpapi_pagination' in results and 'next' in results['serpapi_pagination']:
+                    next_page_url = results['serpapi_pagination']['next']
+                # Fallback to legacy format
+                elif 'pagination' in results and 'next_link' in results['pagination']:
+                    next_page_url = results['pagination']['next_link']
+                else:
+                    next_page_url = None
+                    metrics['pagination_misses'].inc() # Increment pagination misses
+                logger.debug(f"Pagination check result: {next_page_url or 'No more pages'}")
+
+
+                if next_page_url: # Use next_page_url if available (for pagination)
                     logger.debug(f"Pagination link found for page {page_num}: {next_page_url}")
                     page_num += 1
                 else:
