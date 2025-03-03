@@ -2,7 +2,7 @@
 fastapi
 uvicorn
 aiohttp
-serpapi
+serpapi==0.1.5
 supabase
 python-dotenv
 pydantic
