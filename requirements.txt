@@ -1,0 +1,24 @@
+# Core dependencies for FastAPI and scraping
+fastapi
+uvicorn
+aiohttp
+serpapi
+supabase
+python-dotenv
+pydantic
+async-timeout
+
+# HTML parsing and validation
+beautifulsoup4
+phonenumbers
+email-validator
+
+# Browser automation
+playwright
+
+# Optional dependencies (uncomment if needed)
+redis  # For future Redis queue integration
+prometheus_client  # For metrics monitoring
+fake-useragent  # For user agent rotation
+2captcha-python  # For CAPTCHA solving
+ollama  # For LLM analysis
