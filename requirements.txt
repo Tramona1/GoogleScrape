@@ -9,6 +9,7 @@ pydantic
 async-timeout
 google-search-results
 aiodns
+lxml
 
 # HTML parsing and validation
 beautifulsoup4
