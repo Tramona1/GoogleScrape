@@ -830,39 +830,43 @@ def save_to_csv(data_list, batch_number):
 
 
 async def run_scraper(location: str):
-    """Run the scraper for a single location."""
     start_time = time.time()
     logger.info(f"Starting scrape for location: {location}")
+    try:
+        url_contexts = []
+        for term in SEARCH_TERMS:
+            search_results = await get_google_search_results(location, term, proxy_pool=None)
+            if search_results and search_results["urls"]:
+                for url in search_results["urls"]:
+                    url_contexts.append({
+                        "city": location,
+                        "term": term,
+                        "url": normalize_url(url),
+                        "depth": 0
+                    })
+        logger.info(f"Found {len(url_contexts)} URLs for {location}")
+        extracted_data_list = await process_urls_async(url_contexts, None, CRAWL_SEM)
 
-    # Step 1: Fetch URLs from SerpAPI
-    url_contexts = []
-    for term in SEARCH_TERMS:
-        search_results = await get_google_search_results(location, term, proxy_pool=None)
-        if search_results and search_results["urls"]:
-            for url in search_results["urls"]:
-                url_contexts.append({
-                    "city": location,
-                    "term": term,
-                    "url": normalize_url(url),
-                    "depth": 0
-                })
-    logger.info(f"Found {len(url_contexts)} URLs for {location}")
-
-    # Step 2: Process URLs
-    extracted_data_list = await process_urls_async(url_contexts, None, CRAWL_SEM)
-
-    # Step 3: Save results
-    if extracted_data_list:
+        # Filter out RuntimeErrors and log them
+        valid_data_list = []
         for data in extracted_data_list:
-            db_saved = save_to_supabase(supabase_client, data)
-            if not db_saved:
-                save_to_csv([data], int(time.time()))  # Use timestamp as batch number
-        logger.info(f"Extracted and saved data from {len(extracted_data_list)} websites for {location}")
-    else:
-        logger.warning(f"No data extracted for {location}")
+            if isinstance(data, Exception):
+                logger.error(f"Error in crawl result: {str(data)}")
+            else:
+                valid_data_list.append(data)
 
+        if valid_data_list:
+            for data in valid_data_list:
+                db_saved = save_to_supabase(supabase_client, data)
+                if not db_saved:
+                    save_to_csv([data], int(time.time()))
+            logger.info(f"Extracted and saved data from {len(valid_data_list)} websites for {location}")
+        else:
+            logger.warning(f"No valid data extracted for {location}")
+    except Exception as e:
+        logger.error(f"Scrape failed for {location}: {str(e)}")
     duration = time.time() - start_time
-    logger.info(f"Scrape for {location} completed in {duration:.2f} seconds.")
+    logger.info(f"Scrape for {location} completed in {duration:.2f} seconds")
 
 async def test_rotation():
     proxies = ["p1","p2","p3"]

@@ -8,6 +8,7 @@ python-dotenv
 pydantic
 async-timeout
 google-search-results
+aiodns
 
 # HTML parsing and validation
 beautifulsoup4
