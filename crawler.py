@@ -230,7 +230,7 @@ async def process_urls_async(url_contexts, proxy_pool, crawl_semaphore): # REMOV
                 logger.debug(f"Finished crawl_and_extract_async for {context['url']}, Data: {data}")
                 print(f"DEBUG (controlled_crawl): Data extracted from {context['url']}: {data}")
                 if data and data.url:
-                    db_saved = save_to_supabase(supabase_client, data)
+                    db_saved = await save_to_supabase(supabase_client, data)
                     if not db_saved:
                         save_to_csv([data], context.get("batch_number", 0))
                     return data
@@ -583,8 +583,8 @@ def create_lat_lng_gis_point(lat: float, lng: float) -> str:
     """Create a PostGIS point using proper ST functions."""
     return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
 
-def save_to_supabase(supabase_client, data):
-    """Saves extracted data to Supabase database (now synchronous)."""
+async def save_to_supabase(supabase_client, data):
+    """Saves extracted data to Supabase database (now asynchronous)."""
     try:
         # --- Data Validation ---
         required_fields = ['url']
@@ -887,7 +887,7 @@ async def run_scraper(location: str):
 
         if valid_data_list:
             for data in valid_data_list:
-                db_saved = save_to_supabase(supabase_client, data)
+                db_saved = await save_to_supabase(supabase_client, data)
                 if not db_saved:
                     save_to_csv([data], int(time.time()))
             logger.info(f"Extracted and saved data from {len(valid_data_list)} websites for {location}")
