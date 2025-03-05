@@ -280,202 +280,79 @@ async def get_google_search_results(city, term, proxy_pool):
         "exclude_domains": ".gov"
     }
 
-    try:
-        async with SEARCH_SEM:
-            search = GoogleSearch(params)
-            results = await asyncio.to_thread(search.get_dict)
+    max_retries = 3
+    retry_delay = 5  # seconds
 
-        if not isinstance(results, dict) or 'error' in results:
-            logger.error(f"SerpAPI error: {results.get('error', 'Invalid response')}")
-            return {"city": city, "term": term, "urls": []}
+    for attempt in range(max_retries):
+        try:
+            async with SEARCH_SEM:
+                # Run SerpAPI in thread to prevent blocking
+                search = GoogleSearch(params)
+                results = await asyncio.to_thread(lambda: search.get_dict())
 
-        if results.get("search_metadata", {}).get("status") == "Processing":
-            json_endpoint = results["search_metadata"]["json_endpoint"]
-            retries = 0
-            while retries < 5 and results.get("search_metadata", {}).get("status") == "Processing":
-                await asyncio.sleep(2)
-                results = await fetch_serpapi_json(json_endpoint)
-                retries += 1
+            if not isinstance(results, dict):
+                logger.error(f"Invalid response format from SerpAPI for {city} {term}: {results}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                return {"city": city, "term": term, "urls": []}
 
-        if results.get("search_metadata", {}).get("status") == "Success" and 'organic_results' in results:
-            for result in results['organic_results']:
-                url = result.get('link')
-                if url and normalize_url(url) and not BAD_PATH_PATTERN.search(urlparse(url).path):
-                    domain = urlparse(url).netloc.lower().replace('www.', '')
-                    if domain not in GENERIC_DOMAINS:
-                        all_urls.append(url)
-    except Exception as e:
-        logger.error(f"SerpAPI error for {city} {term}: {str(e)}")
+            if 'error' in results:
+                logger.error(f"SerpAPI error for {city} {term}: {results['error']}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                return {"city": city, "term": term, "urls": []}
+
+            if results.get("search_metadata", {}).get("status") == "Processing":
+                json_endpoint = results["search_metadata"]["json_endpoint"]
+                processing_retries = 0
+                while processing_retries < 5 and results.get("search_metadata", {}).get("status") == "Processing":
+                    await asyncio.sleep(2)
+                    async with async_timeout.timeout(30):
+                        results = await fetch_serpapi_json(json_endpoint)
+                    processing_retries += 1
+
+            if results.get("search_metadata", {}).get("status") == "Success" and 'organic_results' in results:
+                for result in results['organic_results']:
+                    url = result.get('link')
+                    if url and normalize_url(url) and not BAD_PATH_PATTERN.search(urlparse(url).path):
+                        domain = urlparse(url).netloc.lower().replace('www.', '')
+                        if domain not in GENERIC_DOMAINS:
+                            all_urls.append(url)
+                break  # Success, exit retry loop
+            else:
+                logger.error(f"No organic results found for {city} {term}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while fetching results for {city} {term}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+
+        except Exception as e:
+            logger.error(f"SerpAPI error for {city} {term}: {str(e)}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+
     return {"city": city, "term": term, "urls": all_urls}
 
-
-# async def get_google_search_results(city, term, proxy_pool):
-#     global search_count, proxy_pool_to_use, current_proxy_index
-#     logger.debug(f"Entering get_google_search_results for city={city}, term={term}")
-#     all_urls = []
-#     next_page_url = None  # Initialize next_page_url
-#     page_num = 1 # Track page number for logging
-
-#     params = {
-#         "engine": "google",
-#         "q": f'"{term}" "{city}"',  # Add quotes for exact phrase matching
-#         "gl": "us",
-#         "hl": "en",
-#         "num": 150,  # Reduced num for testing - Reduced num for testing - Reduced num for testing
-#         "api_key": SERPAPI_API_KEY,
-#         "async": True,
-#         "no_cache": True,
-#         "exclude_domains": ".gov" # Filter out .gov domains
-#     }
-#     params['exclude_domains'] = ".gov" # Filter out .gov domains
-#     current_proxy = None
-#     proxy_key = 'no_proxy'
-#     use_proxy_for_serpapi = False # --- PROXY DISABLED --- #should_use_proxies(proxy_pool)
-
-
-#     if USE_PROXY and use_proxy_for_serpapi and proxy_pool and len(proxy_pool) > 0:
-#         current_proxy = rotate_proxy_crawler(proxy_pool)
-#         proxy_key = current_proxy
-
-#     try:
-#         GoogleSearch.SERPAPI_HTTP_PROXY = None
-
-#         while page_num <= PAGES_PER_QUERY: # Paginate up to PAGES_PER_QUERY (e.g., 15)
-#             logger.info(f"Fetching SerpAPI page {page_num} for {city} {term}...") # Log page number
-#             if next_page_url: # Use next_page_url if available (for pagination)
-#                 search = GoogleSearch({"api_key": SERPAPI_API_KEY, "async": True, "no_cache": True, "url": next_page_url}) # Use 'url' param for pagination
-#             else: # Initial search
-#                 search = GoogleSearch(params)
-
-#             try: # Apply SEARCH_SEM with timeout
-#                 async with async_timeout.timeout(45):
-#                     async with SEARCH_SEM:
-#                         search = GoogleSearch(params)
-#                         # time.sleep(10) # <--- ADD THIS DELAY - Delay before get_dict # REMOVED DELAY LINE
-#                         results = await asyncio.to_thread(search.get_dict)
-#                         logger.debug(f"Raw SerpAPI response: {json.dumps(results, indent=2)}") # <--- ADDED DEBUG LOGGING HERE - Raw response logging
-
-#                         # Additional Defensive Coding Improvements - START
-#                         if not isinstance(results, dict):
-#                             logger.error(f"Unexpected SerpAPI response format: {type(results)}")
-#                             metrics['serpapi_errors'].inc()
-#                             return {"city": city, "term": term, "urls": []}
-
-#                         if 'error' in results:
-#                             logger.error(f"SerpAPI error: {results['error']}")
-#                             metrics['serpapi_errors'].inc()
-#                             return {"city": city, "term": term, "urls": []}
-#                         # Additional Defensive Coding Improvements - END
-
-#                         if 'error' in results: # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
-#                             logger.error(f"SerpAPI error for query '{city} {term}', page {page_num}: {results['error']}") # Debug and Fix SerpAPI Queries - Add detailed logging for SerpAPI errors
-#                             metrics['serpapi_errors'].inc() # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
-#                             break # Stop pagination on error
-
-
-#                         # Wait for async results to complete
-#                         if results.get("search_metadata", {}).get("status") == "Processing":
-#                             json_endpoint = results["search_metadata"]["json_endpoint"]
-#                             retries = 0
-#                             while retries < 5 and results.get("search_metadata", {}).get("status") == "Processing":
-#                                 await asyncio.sleep(2)
-#                                 results = await fetch_serpapi_json(json_endpoint)
-#                                 retries += 1
-
-
-#             except asyncio.TimeoutError:
-#                 logger.error(f"Timeout in SEARCH_SEM for {city} {term}, page {page_num}. Skipping page.")
-#                 metrics['serpapi_errors'].inc()
-#                 serpapi_usage["failed_searches"] += 1
-#                 break # Skip to next city/term
-
-#             if 'search_metadata' not in results or results['search_metadata'].get('status') == ' à¦•à§ à¦¯à¦¾à¦ªà¦šà¦¾ ':
-#                 logger.warning(f"SerpAPI CAPTCHA or error on page {page_num} for {city} {term}. Stopping pagination.")
-#                 metrics['captcha_requests'].inc()
-#                 metrics['captcha_failed'].inc()
-#                 if USE_PROXY and current_proxy and use_proxy_for_serpapi:
-#                     utils.update_proxy_score(proxy_key, False) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
-#                 break # Stop pagination
-
-#             original_url_count = 0
-#             filtered_urls = []
-#             removed_domains = set()
-
-#             # Process results only when status is "Success"
-#             if results.get("search_metadata", {}).get("status") == "Success" and 'organic_results' in results:
-#                 organic_results = results['organic_results']
-#                 original_url_count = len(organic_results)
-
-#                 for result in organic_results:
-#                     url = result.get('link')
-#                     if url and utils.is_valid_url(url):
-#                         domain = urlparse(url).netloc.lower().replace('www.', '')
-#                         if domain in GENERIC_DOMAINS:
-#                             removed_domains.add(domain)
-#                             logger.debug(f"SerpAPI Filter - Generic Domain: {url} - Domain: {domain}") # DEBUG LOG - GENERIC DOMAIN FILTER
-#                             continue
-#                         if utils.BAD_PATH_PATTERN.search(urlparse(url).path):
-#                             continue
-#                         filtered_urls.append(url)
-
-#                 logger.info(f"Page {page_num} URLs after filter: {len(filtered_urls)}/{original_url_count}")
-#                 logger.debug(f"Page {page_num} Removed domains: {removed_domains}")
-#                 all_urls.extend(filtered_urls)
-
-#                 # --- UPDATED PAGINATION CHECK HERE ---
-#                 # Check for modern SerpAPI pagination format first
-#                 if 'serpapi_pagination' in results and 'next' in results['serpapi_pagination']:
-#                     next_page_url = results['serpapi_pagination']['next']
-#                 # Fallback to legacy format
-#                 elif 'pagination' in results and 'next_link' in results['pagination']:
-#                     next_page_url = results['pagination']['next_link']
-#                 else:
-#                     next_page_url = None
-#                     metrics['pagination_misses'].inc() # Increment pagination misses
-#                 logger.debug(f"Pagination check result: {next_page_url or 'No more pages'}")
-
-
-#                 if next_page_url: # Use next_page_url if available (for pagination)
-#                     logger.debug(f"Pagination link found for page {page_num}: {next_page_url}")
-#                     page_num += 1
-#                 else:
-#                     logger.info(f"No more pagination links after page {page_num} for {city} {term}.")
-#                     break
-
-#                 if USE_PROXY and current_proxy and use_proxy_for_serpapi:
-#                     utils.update_proxy_score(proxy_key, True) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
-#             else:
-#                 logger.warning(f"No organic results on page {page_num} for {city} {term}.")
-#                 if USE_PROXY and current_proxy and use_proxy_for_serpapi:
-#                     utils.update_proxy_score(proxy_key, False) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
-
-
-#             serpapi_usage["total_searches"] += 1
-#             search_count[proxy_key] += 1
-#             if 'search_metadata' in results and results['search_metadata'].get('search_information', {}).get('status_code') in [429, 503]:
-#                 logger.warning(f"SerpAPI capacity issue on page {page_num} for {city} {term}. Waiting 60s...")
-#                 await asyncio.sleep(60)
-#                 metrics['rate_limit_errors'].inc() # Monitor Rate-Limiting and CAPTCHA Challenges - metrics to track rate-limiting and CAPTCHA challenges
-
-
-#         # --- PAGINATION CHECK MOVED INSIDE 'organic_results' block --- (already done above)
-
-#     except Exception as e:
-#         logger.error(f"Error in get_google_search_results for {city} {term}: {traceback.format_exc()}")
-#         metrics['serpapi_errors'].inc()
-#         serpapi_usage["failed_searches"] += 1
-#         if USE_PROXY and current_proxy and use_proxy_for_serpapi:
-#             utils.update_proxy_score(proxy_key, False) # Debug and Fix SerpAPI Queries - Ensure proper handling of async results
-#     finally:
-#         GoogleSearch.SERPAPI_HTTP_PROXY = None
-#         logger.debug(f"Exiting get_google_search_results for city={city}, term={term}, returning {len(all_urls)} urls")
-
-#     return {"city": city, "term": term, "urls": all_urls}
-
 async def fetch_serpapi_json(endpoint):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(endpoint) as response: # Added 'as response'
-            return await response.json()
+    """Fetch JSON from SerpAPI endpoint with timeout and error handling."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(endpoint) as response:
+                if response.status != 200:
+                    logger.error(f"Error fetching from SerpAPI endpoint: {response.status}")
+                    return None
+                return await response.json()
+    except Exception as e:
+        logger.error(f"Error fetching from SerpAPI endpoint: {str(e)}")
+        return None
 
 
 async def process_pagination(next_page_url, city, term, original_query): # --- Pagination Fix: Add original_query parameter ---
@@ -569,7 +446,8 @@ google_maps_client = GoogleMapsClient(key=GOOGLE_MAPS_KEY)
 async def get_coordinates(address: str) -> Optional[dict]:
     """Get coordinates using Google Maps Geocoding API."""
     try:
-        result = google_maps_client.geocode(address)
+        # Run the synchronous geocoding in a thread to not block
+        result = await asyncio.to_thread(google_maps_client.geocode, address)
         if result and len(result) > 0:
             location = result[0]['geometry']['location']
             bounds = result[0]['geometry'].get('bounds')
@@ -596,10 +474,13 @@ async def save_to_supabase(supabase_client, data):
             logger.warning(f"Skipping {data.url} - no contact info")
             return False
 
-        existing = supabase_client.table('property_manager_contacts') \
-            .select('url') \
-            .eq('url', str(data.url)) \
+        # Run Supabase operations in thread to prevent blocking
+        existing = await asyncio.to_thread(
+            lambda: supabase_client.table('property_manager_contacts')
+            .select('url')
+            .eq('url', str(data.url))
             .execute()
+        )
 
         if existing.data:
             logger.warning(f"Duplicate URL skipped: {data.url}")
@@ -623,28 +504,31 @@ async def save_to_supabase(supabase_client, data):
         }
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
-        response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute()
+        # Run Supabase insert in thread to prevent blocking
+        response = await asyncio.to_thread(
+            lambda: supabase_client.table('property_manager_contacts')
+            .insert(data_for_supabase)
+            .execute()
+        )
 
-        logger.debug(f"Supabase response: {str(response)[:200]}...") # Improved debug logging - truncated response
+        logger.debug(f"Supabase response: {str(response)[:200]}...")
 
-        # --- UPDATED ERROR CHECKING  ---
         if hasattr(response, 'error') and response.error:
             logger.error(f"Supabase insert failed: {response.error.message}")
-            logger.error(f"Supabase Error Details: {response.error}") # More details
-            logger.error(f"Data Payload causing error: {data_for_supabase}") # Log payload
+            logger.error(f"Supabase Error Details: {response.error}")
+            logger.error(f"Data Payload causing error: {data_for_supabase}")
             return False
 
         if not response.data:
             logger.error("Supabase insert succeeded but returned no data. Possible issue.")
-            logger.debug(f"Data Payload on success with no data: {data_for_supabase}") # Log payload on success with no data
+            logger.debug(f"Data Payload on success with no data: {data_for_supabase}")
             return False
 
-        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, url: {data.url}") # Improved success log - include id and URL
+        logger.debug(f"Data saved successfully to Supabase, id: {response.data[0]['id']}, url: {data.url}")
         return True
-        # --- END UPDATED ERROR CHECKING ---
 
-    except Exception as e_supabase:
-        logger.exception(f"Supabase error: {e_supabase}")
+    except Exception as e:
+        logger.exception(f"Supabase error: {e}")
         return False
 
 def save_to_csv(data_list, batch_number):
