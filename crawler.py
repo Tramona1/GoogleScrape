@@ -28,7 +28,7 @@ import time
 import csv
 import logging
 import datetime
-import shelve # 12. Redis Queue Integration ðŸ“¦ - REMOVED shelve import
+import shelve # 12. Redis Queue Integration ðŸ"¦ - REMOVED shelve import
 import json
 from supabase import create_client
 from fastapi import FastAPI, BackgroundTasks
@@ -49,7 +49,7 @@ from collections import defaultdict
 import traceback
 import async_timeout # Import async_timeout - ALREADY IMPORTED IN UTILS, BUT KEEPING HERE AS WELL FOR CLARITY IN CRAWLER
 from itertools import cycle  # Add this import at the top with other imports
-import redis # 12. Redis Queue Integration ðŸ“¦ - ADDED redis import
+import redis # 12. Redis Queue Integration ðŸ"¦ - ADDED redis import
 import threading  # Add this import
 from googlemaps import Client as GoogleMapsClient
 
@@ -443,26 +443,8 @@ if not GOOGLE_MAPS_KEY:
 
 google_maps_client = GoogleMapsClient(key=GOOGLE_MAPS_KEY)
 
-async def get_coordinates(address: str) -> Optional[dict]:
-    """Get coordinates using Google Maps Geocoding API."""
-    try:
-        # Run the synchronous geocoding in a thread to not block
-        result = await asyncio.to_thread(google_maps_client.geocode, address)
-        if result and len(result) > 0:
-            location = result[0]['geometry']['location']
-            bounds = result[0]['geometry'].get('bounds')
-            return {'location': location, 'bounds': bounds}
-        return None
-    except Exception as e:
-        logger.error(f"Google Maps geocoding error for address {address}: {e}")
-        return None
-
-def create_lat_lng_gis_point(lat: float, lng: float) -> str:
-    """Create a PostGIS point using proper ST functions."""
-    return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
-
 async def save_to_supabase(supabase_client, data):
-    """Saves extracted data to Supabase database (now asynchronous)."""
+    """Saves extracted data to Supabase database."""
     try:
         # --- Data Validation ---
         required_fields = ['url']
@@ -474,24 +456,21 @@ async def save_to_supabase(supabase_client, data):
             logger.warning(f"Skipping {data.url} - no contact info")
             return False
 
-        # Run Supabase operations in thread to prevent blocking
-        existing = await asyncio.to_thread(
-            lambda: supabase_client.table('property_manager_contacts')
-            .select('url')
-            .eq('url', str(data.url))
+        existing = supabase_client.table('property_manager_contacts') \
+            .select('url') \
+            .eq('url', str(data.url)) \
             .execute()
-        )
 
         if existing.data:
             logger.warning(f"Duplicate URL skipped: {data.url}")
             return True
 
-        # Get coordinates for the city using Google Maps
-        coordinates = None
-        if data.city:
-            geocoding_result = await get_coordinates(data.city)
-            if geocoding_result and geocoding_result['location']:
-                coordinates = geocoding_result['location']
+        # Comment out geocoding for now
+        # coordinates = None
+        # if data.city:
+        #     geocoding_result = await get_coordinates(data.city)
+        #     if geocoding_result and geocoding_result['location']:
+        #         coordinates = geocoding_result['location']
 
         data_for_supabase = {
             'name': str(data.name or 'N/A'),
@@ -500,16 +479,11 @@ async def save_to_supabase(supabase_client, data):
             'city': str(data.city or 'N/A'),
             'url': str(data.url),
             'search_keywords': data.searchKeywords,
-            'latLngPoint': create_lat_lng_gis_point(coordinates['lat'], coordinates['lng']) if coordinates else None,
+            # 'latLngPoint': create_lat_lng_gis_point(coordinates['lat'], coordinates['lng']) if coordinates else None,
         }
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
-        # Run Supabase insert in thread to prevent blocking
-        response = await asyncio.to_thread(
-            lambda: supabase_client.table('property_manager_contacts')
-            .insert(data_for_supabase)
-            .execute()
-        )
+        response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute()
 
         logger.debug(f"Supabase response: {str(response)[:200]}...")
 
@@ -530,6 +504,24 @@ async def save_to_supabase(supabase_client, data):
     except Exception as e:
         logger.exception(f"Supabase error: {e}")
         return False
+
+# Comment out unused geocoding functions
+# async def get_coordinates(address: str) -> Optional[dict]:
+#     """Get coordinates using Google Maps Geocoding API."""
+#     try:
+#         result = await asyncio.to_thread(google_maps_client.geocode, address)
+#         if result and len(result) > 0:
+#             location = result[0]['geometry']['location']
+#             bounds = result[0]['geometry'].get('bounds')
+#             return {'location': location, 'bounds': bounds}
+#         return None
+#     except Exception as e:
+#         logger.error(f"Google Maps geocoding error for address {address}: {e}")
+#         return None
+
+# def create_lat_lng_gis_point(lat: float, lng: float) -> str:
+#     """Create a PostGIS point using proper ST functions."""
+#     return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
 
 def save_to_csv(data_list, batch_number):
     csv_filename = f"property_managers_data_batch_{batch_number}.csv" # You can rename this if you want
@@ -758,27 +750,34 @@ async def run_scraper(location: str):
                         "url": normalize_url(url),
                         "depth": 0
                     })
+
         logger.info(f"Found {len(url_contexts)} URLs for {location}")
-        extracted_data_list = await process_urls_async(url_contexts, None, CRAWL_SEM)
 
-        # Filter out RuntimeErrors and log them
-        valid_data_list = []
-        for data in extracted_data_list:
-            if isinstance(data, Exception):
-                logger.error(f"Error in crawl result: {str(data)}")
-            else:
-                valid_data_list.append(data)
+        # Process URLs in smaller batches
+        batch_size = 5
+        for i in range(0, len(url_contexts), batch_size):
+            batch = url_contexts[i:i + batch_size]
+            extracted_data_list = await process_urls_async(batch, None, CRAWL_SEM)
 
-        if valid_data_list:
-            for data in valid_data_list:
+            # Process each result synchronously
+            for data in extracted_data_list:
+                if isinstance(data, Exception):
+                    logger.error(f"Error in crawl result: {str(data)}")
+                    continue
+
+                if data is None:
+                    continue
+
                 db_saved = await save_to_supabase(supabase_client, data)
                 if not db_saved:
                     save_to_csv([data], int(time.time()))
-            logger.info(f"Extracted and saved data from {len(valid_data_list)} websites for {location}")
-        else:
-            logger.warning(f"No valid data extracted for {location}")
+
+            # Small delay between batches
+            await asyncio.sleep(1)
+
     except Exception as e:
         logger.error(f"Scrape failed for {location}: {str(e)}")
+
     duration = time.time() - start_time
     logger.info(f"Scrape for {location} completed in {duration:.2f} seconds")
 
@@ -817,9 +816,10 @@ class ScrapeRequest(BaseModel):
     location: str
 
 @app.post("/scrape")
-async def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(run_scraper, request.location)
-    return {"message": "Scraper queued successfully"}
+async def scrape(request: ScrapeRequest):
+    # Start the scraper task directly
+    asyncio.create_task(run_scraper(request.location))
+    return {"message": "Scraper started successfully"}
 
 # Health check
 @app.get("/health")
