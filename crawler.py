@@ -443,6 +443,23 @@ if not GOOGLE_MAPS_KEY:
 
 google_maps_client = GoogleMapsClient(key=GOOGLE_MAPS_KEY)
 
+def get_coordinates_sync(address: str) -> Optional[dict]:
+    """Synchronous version of get_coordinates."""
+    try:
+        result = google_maps_client.geocode(address)
+        if result and len(result) > 0:
+            location = result[0]['geometry']['location']
+            bounds = result[0]['geometry'].get('bounds')
+            return {'location': location, 'bounds': bounds}
+        return None
+    except Exception as e:
+        logger.error(f"Google Maps geocoding error for address {address}: {e}")
+        return None
+
+def create_lat_lng_gis_point(lat: float, lng: float) -> str:
+    """Create a PostGIS point using proper ST functions."""
+    return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
+
 async def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database."""
     try:
@@ -456,21 +473,26 @@ async def save_to_supabase(supabase_client, data):
             logger.warning(f"Skipping {data.url} - no contact info")
             return False
 
-        existing = supabase_client.table('property_manager_contacts') \
-            .select('url') \
-            .eq('url', str(data.url)) \
+        # Run Supabase check in thread to not block
+        existing = await asyncio.to_thread(
+            lambda: supabase_client.table('property_manager_contacts')
+            .select('url')
+            .eq('url', str(data.url))
             .execute()
+        )
 
         if existing.data:
             logger.warning(f"Duplicate URL skipped: {data.url}")
             return True
 
-        # Comment out geocoding for now
-        # coordinates = None
-        # if data.city:
-        #     geocoding_result = await get_coordinates(data.city)
-        #     if geocoding_result and geocoding_result['location']:
-        #         coordinates = geocoding_result['location']
+        # Get coordinates synchronously but in a thread
+        coordinates = None
+        if data.city:
+            try:
+                coordinates = await asyncio.to_thread(get_coordinates_sync, data.city)
+            except Exception as e:
+                logger.error(f"Error getting coordinates for {data.city}: {e}")
+                # Continue without coordinates rather than failing
 
         data_for_supabase = {
             'name': str(data.name or 'N/A'),
@@ -479,11 +501,21 @@ async def save_to_supabase(supabase_client, data):
             'city': str(data.city or 'N/A'),
             'url': str(data.url),
             'search_keywords': data.searchKeywords,
-            # 'latLngPoint': create_lat_lng_gis_point(coordinates['lat'], coordinates['lng']) if coordinates else None,
         }
+
+        # Add latLngPoint if we got coordinates
+        if coordinates and coordinates.get('location'):
+            loc = coordinates['location']
+            data_for_supabase['latLngPoint'] = create_lat_lng_gis_point(loc['lat'], loc['lng'])
+
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
-        response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute()
+        # Run Supabase insert in thread to not block
+        response = await asyncio.to_thread(
+            lambda: supabase_client.table('property_manager_contacts')
+            .insert(data_for_supabase)
+            .execute()
+        )
 
         logger.debug(f"Supabase response: {str(response)[:200]}...")
 
@@ -504,24 +536,6 @@ async def save_to_supabase(supabase_client, data):
     except Exception as e:
         logger.exception(f"Supabase error: {e}")
         return False
-
-# Comment out unused geocoding functions
-# async def get_coordinates(address: str) -> Optional[dict]:
-#     """Get coordinates using Google Maps Geocoding API."""
-#     try:
-#         result = await asyncio.to_thread(google_maps_client.geocode, address)
-#         if result and len(result) > 0:
-#             location = result[0]['geometry']['location']
-#             bounds = result[0]['geometry'].get('bounds')
-#             return {'location': location, 'bounds': bounds}
-#         return None
-#     except Exception as e:
-#         logger.error(f"Google Maps geocoding error for address {address}: {e}")
-#         return None
-
-# def create_lat_lng_gis_point(lat: float, lng: float) -> str:
-#     """Create a PostGIS point using proper ST functions."""
-#     return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
 
 def save_to_csv(data_list, batch_number):
     csv_filename = f"property_managers_data_batch_{batch_number}.csv" # You can rename this if you want
