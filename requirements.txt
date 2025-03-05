@@ -10,6 +10,7 @@ async-timeout
 google-search-results
 aiodns
 lxml
+googlemaps
 
 # HTML parsing and validation
 beautifulsoup4

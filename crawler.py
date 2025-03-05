@@ -1,6 +1,8 @@
 # crawler.py - FULL CODE WITH ALL IMPLEMENTED CHANGES
 import re
 import html # 2. Implement HTML Entity Decoding - IMPORT HTML
+import requests
+from typing import Optional, Tuple
 
 # REMOVE THESE FUNCTIONS FROM CRAWLER.PY:
 # def normalize_phone(number): # 1. Add Phone Normalization - IMPLEMENT FUNCTION
@@ -49,6 +51,7 @@ import async_timeout # Import async_timeout - ALREADY IMPORTED IN UTILS, BUT KEE
 from itertools import cycle  # Add this import at the top with other imports
 import redis # 12. Redis Queue Integration ðŸ“¦ - ADDED redis import
 import threading  # Add this import
+from googlemaps import Client as GoogleMapsClient
 
 print("Imports completed...")
 
@@ -556,21 +559,42 @@ async def process_pagination(next_page_url, city, term, original_query): # --- P
     return all_urls
 
 
+# Initialize Google Maps client
+GOOGLE_MAPS_KEY = os.getenv("GOOGLE_MAPS_KEY")
+if not GOOGLE_MAPS_KEY:
+    raise EnvironmentError("GOOGLE_MAPS_KEY environment variable not set.")
+
+google_maps_client = GoogleMapsClient(key=GOOGLE_MAPS_KEY)
+
+async def get_coordinates(address: str) -> Optional[dict]:
+    """Get coordinates using Google Maps Geocoding API."""
+    try:
+        result = google_maps_client.geocode(address)
+        if result and len(result) > 0:
+            location = result[0]['geometry']['location']
+            bounds = result[0]['geometry'].get('bounds')
+            return {'location': location, 'bounds': bounds}
+        return None
+    except Exception as e:
+        logger.error(f"Google Maps geocoding error for address {address}: {e}")
+        return None
+
+def create_lat_lng_gis_point(lat: float, lng: float) -> str:
+    """Create a PostGIS point using proper ST functions."""
+    return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
+
 def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database (now synchronous)."""
     try:
         # --- Data Validation ---
-        required_fields = ['url']  # This is good but not enforced
-        if not data.url:  # Check data.url now
+        required_fields = ['url']
+        if not data.url:
             logger.warning(f"Missing website URL, skipping insert")
             return False
 
-        # FIX 1: Overly Strict Contact Requirements - Relax contact info requirement
         if not (data.email or data.phoneNumber):
             logger.warning(f"Skipping {data.url} - no contact info")
             return False
-        # --- End Data Validation ---
-
 
         existing = supabase_client.table('property_manager_contacts') \
             .select('url') \
@@ -578,22 +602,28 @@ def save_to_supabase(supabase_client, data):
             .execute()
 
         if existing.data:
-            logger.warning(f"Duplicate URL skipped: {data.url}") # Log data.url
+            logger.warning(f"Duplicate URL skipped: {data.url}")
             return True
 
+        # Get coordinates for the city using Google Maps
+        coordinates = None
+        if data.city:
+            geocoding_result = await get_coordinates(data.city)
+            if geocoding_result and geocoding_result['location']:
+                coordinates = geocoding_result['location']
+
         data_for_supabase = {
-            'name': str(data.name or 'N/A'),             # Map data.name
-            'email': data.email,                         # Map data.email (already a list/array)
-            'phone_number': data.phoneNumber,             # Map data.phoneNumber (already a list/array)
-            'city': str(data.city or 'N/A'),             # Map data.city - from CITIES list now!
-            'url': str(data.url),                       # Map data.url
-            'search_keywords': data.searchKeywords,     # Map searchKeywords
-            # 'latLngPoint': None, # Skip latLngPoint for now
-            # 'lastEmailSentAt': None, # Skip lastEmailSentAt for now
+            'name': str(data.name or 'N/A'),
+            'email': data.email,
+            'phone_number': data.phoneNumber,
+            'city': str(data.city or 'N/A'),
+            'url': str(data.url),
+            'search_keywords': data.searchKeywords,
+            'latLngPoint': create_lat_lng_gis_point(coordinates['lat'], coordinates['lng']) if coordinates else None,
         }
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
-        response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute() # Correct table name
+        response = supabase_client.table('property_manager_contacts').insert(data_for_supabase).execute()
 
         logger.debug(f"Supabase response: {str(response)[:200]}...") # Improved debug logging - truncated response
 
