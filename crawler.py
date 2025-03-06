@@ -503,10 +503,10 @@ async def save_to_supabase(supabase_client, data):
             'search_keywords': data.searchKeywords,
         }
 
-        # Add latLngPoint if we got coordinates
+        # Add coordinates if we have them
         if coordinates and coordinates.get('location'):
             loc = coordinates['location']
-            data_for_supabase['latLngPoint'] = create_lat_lng_gis_point(loc['lat'], loc['lng'])
+            data_for_supabase['lat_lng_point'] = create_lat_lng_gis_point(loc['lat'], loc['lng'])
 
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
