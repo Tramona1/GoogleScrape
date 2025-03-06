@@ -281,7 +281,7 @@ async def get_google_search_results(city, term, proxy_pool):
     }
 
     max_retries = 3
-    retry_delay = 5  # seconds
+    base_delay = 10  # Initial delay in seconds
 
     for attempt in range(max_retries):
         try:
@@ -293,25 +293,40 @@ async def get_google_search_results(city, term, proxy_pool):
             if not isinstance(results, dict):
                 logger.error(f"Invalid response format from SerpAPI for {city} {term}: {results}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    await asyncio.sleep(base_delay * (2 ** attempt))  # Exponential backoff
                     continue
                 return {"city": city, "term": term, "urls": []}
 
             if 'error' in results:
                 logger.error(f"SerpAPI error for {city} {term}: {results['error']}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    await asyncio.sleep(base_delay * (2 ** attempt))  # Exponential backoff
                     continue
                 return {"city": city, "term": term, "urls": []}
 
+            # If the results are still processing, wait and retry with the archive endpoint
             if results.get("search_metadata", {}).get("status") == "Processing":
                 json_endpoint = results["search_metadata"]["json_endpoint"]
+                search_id = results["search_metadata"]["id"]
+                logger.info(f"Search {search_id} is processing. Waiting for results...")
+
+                # Wait and retry getting results from archive
                 processing_retries = 0
-                while processing_retries < 5 and results.get("search_metadata", {}).get("status") == "Processing":
-                    await asyncio.sleep(2)
-                    async with async_timeout.timeout(30):
-                        results = await fetch_serpapi_json(json_endpoint)
+                max_processing_retries = 5
+                while processing_retries < max_processing_retries:
+                    await asyncio.sleep(base_delay)  # Wait between archive checks
+                    try:
+                        async with async_timeout.timeout(30):
+                            archived_results = await asyncio.to_thread(
+                                lambda: GoogleSearch({"api_key": SERPAPI_API_KEY}).get_search_archive(search_id)
+                            )
+                            if archived_results.get("search_metadata", {}).get("status") == "Success":
+                                results = archived_results
+                                break
+                    except Exception as e:
+                        logger.warning(f"Error fetching archived results: {e}")
                     processing_retries += 1
+                    base_delay *= 1.5  # Increase delay between retries
 
             if results.get("search_metadata", {}).get("status") == "Success" and 'organic_results' in results:
                 for result in results['organic_results']:
@@ -320,23 +335,24 @@ async def get_google_search_results(city, term, proxy_pool):
                         domain = urlparse(url).netloc.lower().replace('www.', '')
                         if domain not in GENERIC_DOMAINS:
                             all_urls.append(url)
+                logger.info(f"Successfully found {len(all_urls)} URLs for {city} {term}")
                 break  # Success, exit retry loop
             else:
                 logger.error(f"No organic results found for {city} {term}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    await asyncio.sleep(base_delay * (2 ** attempt))  # Exponential backoff
                     continue
 
         except asyncio.TimeoutError:
             logger.error(f"Timeout while fetching results for {city} {term}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay * (attempt + 1))
+                await asyncio.sleep(base_delay * (2 ** attempt))  # Exponential backoff
                 continue
 
         except Exception as e:
             logger.error(f"SerpAPI error for {city} {term}: {str(e)}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay * (attempt + 1))
+                await asyncio.sleep(base_delay * (2 ** attempt))  # Exponential backoff
                 continue
 
     return {"city": city, "term": term, "urls": all_urls}
