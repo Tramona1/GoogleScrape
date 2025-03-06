@@ -473,8 +473,8 @@ def get_coordinates_sync(address: str) -> Optional[dict]:
         return None
 
 def create_lat_lng_gis_point(lat: float, lng: float) -> str:
-    """Create a PostGIS point using WKT format."""
-    return f"POINT({lng} {lat})"
+    """Create a PostGIS point in WKT format with SRID 4326."""
+    return f"SRID=4326;POINT({lng} {lat})"
 
 async def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database."""
