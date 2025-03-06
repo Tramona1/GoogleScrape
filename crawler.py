@@ -457,8 +457,8 @@ def get_coordinates_sync(address: str) -> Optional[dict]:
         return None
 
 def create_lat_lng_gis_point(lat: float, lng: float) -> str:
-    """Create a PostGIS point using ST functions directly."""
-    return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
+    """Create a PostGIS point using WKT format."""
+    return f"POINT({lng} {lat})"
 
 async def save_to_supabase(supabase_client, data):
     """Saves extracted data to Supabase database."""
@@ -507,7 +507,8 @@ async def save_to_supabase(supabase_client, data):
         if coordinates and coordinates.get('location'):
             loc = coordinates['location']
             try:
-                data_for_supabase['lat_lng_point'] = create_lat_lng_gis_point(loc['lat'], loc['lng'])
+                point_wkt = create_lat_lng_gis_point(loc['lat'], loc['lng'])
+                data_for_supabase['lat_lng_point'] = point_wkt
                 logger.debug(f"Created point: {data_for_supabase['lat_lng_point']}")
             except Exception as e:
                 logger.error(f"Error creating point for coordinates: {e}")
