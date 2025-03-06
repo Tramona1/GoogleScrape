@@ -457,7 +457,7 @@ def get_coordinates_sync(address: str) -> Optional[dict]:
         return None
 
 def create_lat_lng_gis_point(lat: float, lng: float) -> str:
-    """Create a PostGIS point using proper ST functions."""
+    """Create a PostGIS point using ST functions directly."""
     return f"ST_SetSRID(ST_MakePoint({lng}, {lat}), 4326)"
 
 async def save_to_supabase(supabase_client, data):
@@ -506,7 +506,12 @@ async def save_to_supabase(supabase_client, data):
         # Add coordinates if we have them
         if coordinates and coordinates.get('location'):
             loc = coordinates['location']
-            data_for_supabase['lat_lng_point'] = create_lat_lng_gis_point(loc['lat'], loc['lng'])
+            try:
+                data_for_supabase['lat_lng_point'] = create_lat_lng_gis_point(loc['lat'], loc['lng'])
+                logger.debug(f"Created point: {data_for_supabase['lat_lng_point']}")
+            except Exception as e:
+                logger.error(f"Error creating point for coordinates: {e}")
+                # Continue without coordinates if point creation fails
 
         logger.debug(f"Supabase Insert Payload: {data_for_supabase}")
 
